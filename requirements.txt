@@ -1,0 +1,27 @@
+# ==========================================================================
+#  XSS Automation Framework - Dépendances Python
+#  Testé avec Python 3.10 / 3.11
+# ==========================================================================
+
+# --- Interface Web (API + serveur ASGI) ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9          # parsing des formulaires HTML (POST)
+jinja2==3.1.4                    # templates HTML (UI + rapport)
+aiofiles==23.2.1                 # service de fichiers statiques async
+
+# --- Crawling & Reconnaissance ---
+playwright==1.44.0               # crawling JS-aware / rendu SPA / sinks DOM
+
+# --- Parsing des résultats ---
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# --- Orchestration des conteneurs DAST ---
+docker==7.1.0                    # SDK Python Docker (XSStrike / DalFox)
+
+# --- Génération de rapports ---
+reportlab==4.2.0                 # export PDF professionnel
+
+# --- Divers ---
+pydantic==2.7.4                  # modèles de données (validation)

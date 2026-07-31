@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+
+reports/*.html
+reports/*.pdf
+reports/history.json
+
+app_server.log
+*.log
+
+.scratch_tmp/
+.claude/
+.env

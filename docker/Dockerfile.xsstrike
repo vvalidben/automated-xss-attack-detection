@@ -1,0 +1,38 @@
+# ==========================================================================
+#  Dockerfile.xsstrike
+#  Encapsule XSStrike (scanner XSS contextuel) dans un conteneur jetable.
+#
+#  Build (depuis la RACINE du projet) :
+#     docker build -f docker/Dockerfile.xsstrike -t xss-framework/xsstrike:latest .
+#
+#  L'ENTRYPOINT pointe sur xsstrike.py : les arguments passés au conteneur
+#  (via core/scanner_manager.py) sont donc directement ceux de XSStrike, ex :
+#     docker run --rm xss-framework/xsstrike:latest -u "http://cible/?q=x" --skip
+# ==========================================================================
+FROM python:3.11-slim
+
+LABEL maintainer="xss-automation-framework"
+LABEL description="XSStrike containerized for automated XSS DAST"
+
+# Dépendances système minimales (git pour cloner, puis nettoyage).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+
+# Clonage de XSStrike (dépôt officiel s0md3v/XSStrike).
+RUN git clone --depth 1 https://github.com/s0md3v/XSStrike.git
+
+WORKDIR /opt/XSStrike
+
+# Dépendances Python de XSStrike.
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Utilisateur non-root (bonne pratique de sécurité pour les conteneurs).
+RUN useradd -m scanner && chown -R scanner:scanner /opt/XSStrike
+USER scanner
+
+# XSStrike lit ses arguments après le script principal.
+ENTRYPOINT ["python", "xsstrike.py"]
+CMD ["--help"]

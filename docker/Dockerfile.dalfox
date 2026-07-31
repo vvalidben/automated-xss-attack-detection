@@ -1,0 +1,41 @@
+# ==========================================================================
+#  Dockerfile.dalfox
+#  Encapsule DalFox (scanner XSS rapide, écrit en Go).
+#
+#  Build (depuis la RACINE du projet) :
+#     docker build -f docker/Dockerfile.dalfox -t xss-framework/dalfox:latest .
+#
+#  L'ENTRYPOINT pointe sur le binaire dalfox : les arguments passés au
+#  conteneur sont ceux de DalFox, ex :
+#     docker run --rm xss-framework/dalfox:latest url "http://cible/?q=x" --format json
+#
+#  On utilise un build multi-étapes pour ne garder qu'un binaire léger.
+# ==========================================================================
+
+# ---- Étape 1 : compilation ----
+FROM golang:1.22-alpine AS build
+
+# dalfox@latest peut exiger une version de Go plus récente que l'image de
+# base : on laisse le toolchain Go la télécharger automatiquement.
+ENV GOTOOLCHAIN=auto
+
+RUN apk add --no-cache git \
+    && go install github.com/hahwul/dalfox/v2@latest
+
+# ---- Étape 2 : image finale minimale ----
+FROM alpine:3.20
+
+LABEL maintainer="xss-automation-framework"
+LABEL description="DalFox containerized for automated XSS DAST"
+
+# Certificats CA nécessaires pour les cibles HTTPS.
+RUN apk add --no-cache ca-certificates \
+    && adduser -D scanner
+
+# Récupération du binaire compilé depuis l'étape de build.
+COPY --from=build /go/bin/dalfox /usr/local/bin/dalfox
+
+USER scanner
+
+ENTRYPOINT ["dalfox"]
+CMD ["--help"]

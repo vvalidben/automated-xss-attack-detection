@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rapport XSS — {{ target }}</title>
+  <style>
+    :root {
+      --primary:#1a237e; --accent:#7c4dff; --bg:#eef0f9; --card:#fff;
+      --crit:#8e0000; --high:#d9534f; --med:#f0ad4e; --low:#5bc0de; --info:#777777;
+      --ok:#00b871;
+    }
+    * { box-sizing:border-box; }
+    body { font-family:'Segoe UI',Roboto,Arial,sans-serif; margin:0; background:var(--bg); color:#20232a; }
+
+    header {
+      background:linear-gradient(120deg,#0d1440,#1a237e 45%,#5c3fd1 100%);
+      color:#fff; padding:44px 40px 38px; position:relative; overflow:hidden;
+    }
+    header::before {
+      content:''; position:absolute; inset:0;
+      background:radial-gradient(circle at 85% 20%, rgba(255,255,255,.12), transparent 55%),
+                 radial-gradient(circle at 10% 90%, rgba(124,77,255,.35), transparent 50%);
+    }
+    header .htop { position:relative; display:flex; align-items:center; gap:14px; margin-bottom:10px; }
+    header .shield { font-size:34px; filter:drop-shadow(0 0 10px rgba(255,255,255,.5)); }
+    header h1 { margin:0; font-size:27px; letter-spacing:.3px; position:relative; }
+    header .meta { position:relative; margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; }
+    header .chip {
+      background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.25);
+      border-radius:20px; padding:6px 14px; font-size:13px; backdrop-filter:blur(4px);
+    }
+    header .chip b { font-weight:700; }
+
+    .container { max-width:1150px; margin:-26px auto 0; padding:0 20px 40px; position:relative; }
+
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:18px; margin-bottom:28px; }
+    .card {
+      background:var(--card); border-radius:14px; padding:22px;
+      box-shadow:0 8px 28px rgba(26,35,126,.10); border:1px solid rgba(26,35,126,.06);
+    }
+    .kpi { text-align:center; border-top:4px solid var(--accent); position:relative; }
+    .kpi.k-vulns { border-top-color:var(--high); }
+    .kpi.k-pages { border-top-color:#42a5f5; }
+    .kpi.k-score { border-top-color:var(--accent); }
+    .kpi .num { font-size:36px; font-weight:800; color:var(--primary); line-height:1.1; }
+    .kpi .lbl { font-size:12px; color:#666; text-transform:uppercase; letter-spacing:.8px; margin-top:4px; }
+
+    .risk-badge { display:inline-flex; align-items:center; gap:6px; padding:7px 16px; border-radius:20px;
+                  font-weight:700; color:#fff; font-size:14px; box-shadow:0 4px 14px rgba(0,0,0,.15); }
+
+    h2 {
+      color:var(--primary); margin:36px 0 16px; font-size:19px; display:flex; align-items:center; gap:10px;
+      padding-bottom:10px; border-bottom:3px solid transparent;
+      border-image:linear-gradient(90deg,var(--accent),transparent) 1;
+    }
+    h2 .ico { font-size:20px; }
+
+    table { width:100%; border-collapse:collapse; background:#fff; border-radius:10px; overflow:hidden;
+            box-shadow:0 2px 10px rgba(0,0,0,.06); }
+    th { background:linear-gradient(90deg,var(--primary),#3949ab); color:#fff; text-align:left;
+         padding:11px 13px; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+    td { padding:11px 13px; border-top:1px solid #eef0f7; font-size:13px; vertical-align:top; }
+    tr:nth-child(even) td { background:#fafbff; }
+    tr:hover td { background:#f1f2ff; }
+
+    .sev { font-weight:700; padding:4px 10px; border-radius:6px; color:#fff; font-size:11px;
+           white-space:nowrap; letter-spacing:.3px; display:inline-block; }
+    .sev-Critical { background:var(--crit); }
+    .sev-High { background:var(--high); }
+    .sev-Medium { background:var(--med); color:#3a2900; }
+    .sev-Low { background:var(--low); }
+    .sev-Info { background:var(--info); }
+    .badge-ok { background:var(--ok); }
+    .badge-warn { background:#9aa0ac; }
+
+    code { background:#20232a; color:#7bffb0; padding:3px 7px; border-radius:5px; font-size:12px;
+           word-break:break-all; display:inline-block; max-width:100%; }
+
+    .bar-wrap { background:#eceefb; border-radius:8px; overflow:hidden; height:30px; display:flex;
+                box-shadow:inset 0 0 0 1px rgba(26,35,126,.06); }
+    .bar-seg { height:100%; display:flex; align-items:center; justify-content:center; color:#fff;
+               font-size:11px; font-weight:700; transition:.3s; }
+    .legend { display:flex; gap:16px; flex-wrap:wrap; margin-top:12px; font-size:12px; color:#555; }
+    .legend span { display:inline-flex; align-items:center; gap:6px; }
+    .legend i { width:10px; height:10px; border-radius:3px; display:inline-block; }
+
+    .empty { text-align:center; padding:50px 20px; color:var(--ok); font-size:17px; font-weight:600; }
+    .empty .big { font-size:44px; display:block; margin-bottom:12px; }
+    footer { text-align:center; color:#999; font-size:12px; padding:26px; }
+    .muted { color:#888; font-size:12px; }
+
+    .vuln-row-Critical td:first-child { box-shadow:inset 4px 0 0 var(--crit); }
+    .vuln-row-High td:first-child { box-shadow:inset 4px 0 0 var(--high); }
+    .vuln-row-Medium td:first-child { box-shadow:inset 4px 0 0 var(--med); }
+    .vuln-row-Low td:first-child { box-shadow:inset 4px 0 0 var(--low); }
+    .vuln-row-Info td:first-child { box-shadow:inset 4px 0 0 var(--info); }
+
+    .proof-card { border-radius:14px; overflow:hidden; margin-bottom:20px; background:#fff;
+                  box-shadow:0 8px 24px rgba(26,35,126,.10); border-left:6px solid var(--info); }
+    .proof-Critical { border-left-color:var(--crit); }
+    .proof-High { border-left-color:var(--high); }
+    .proof-Medium { border-left-color:var(--med); }
+    .proof-Low { border-left-color:var(--low); }
+    .proof-card .proof-head { padding:16px 20px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+                                background:#fafbff; border-bottom:1px solid #eef0f7; }
+    .proof-card .proof-body { padding:16px 20px; }
+    .proof-card img { max-width:100%; border-radius:8px; border:1px solid #e2e4f0;
+                       box-shadow:0 4px 16px rgba(0,0,0,.08); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="htop">
+      <span class="shield">🛡️</span>
+      <h1>Rapport d'Analyse XSS Automatisée</h1>
+    </div>
+    <div class="meta">
+      <span class="chip">🎯 Cible : <b>{{ target }}</b></span>
+      <span class="chip">🕒 {{ generated_at }}</span>
+      {% if scan_meta and scan_meta.get('scanners') %}
+      <span class="chip">🧰 {{ scan_meta.get('scanners') | join(' + ') }}</span>
+      {% endif %}
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- KPIs -->
+    <div class="grid">
+      <div class="card kpi k-vulns">
+        <div class="num">{{ total_vulns }}</div>
+        <div class="lbl">Vulnérabilités</div>
+      </div>
+      <div class="card kpi k-pages">
+        <div class="num">{{ crawl.get('pages', '—') }}</div>
+        <div class="lbl">Pages crawlées</div>
+      </div>
+      <div class="card kpi k-score">
+        <div class="num">{{ risk_score }}</div>
+        <div class="lbl">Score de risque</div>
+      </div>
+      <div class="card kpi">
+        <div class="lbl" style="margin-bottom:10px;">Niveau de risque</div>
+        {% set rc = '#8e0000' if risk_level == 'Élevé' else ('#f0ad4e' if risk_level == 'Modéré' else ('#777777' if 'faux positifs' in risk_level else '#00b871')) %}
+        {% set ri = '🔴' if risk_level == 'Élevé' else ('🟠' if risk_level == 'Modéré' else ('⚪' if 'faux positifs' in risk_level else '🟢')) %}
+        <span class="risk-badge" style="background:{{ rc }}">{{ ri }} {{ risk_level }}</span>
+        {% if unconfirmed_count %}
+        <p class="muted" style="margin-top:8px;font-size:.85em;">
+          Basé sur {{ confirmed_count }} vulnérabilité(s) confirmée(s) par exécution réelle.
+          {{ unconfirmed_count }} signal(aux) heuristique(s) supplémentaire(s) non confirmé(s)
+          (possibles faux positifs) — voir tableau ci-dessous.
+        </p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Répartition sévérité -->
+    <div class="card">
+      <h2 style="margin-top:0"><span class="ico">📊</span>Répartition par sévérité</h2>
+      {% set total = namespace(v=0) %}
+      {% for s, c in severity_stats.items() %}{% set total.v = total.v + c %}{% endfor %}
+      {% if total.v > 0 %}
+      <div class="bar-wrap">
+        {% for s, c in severity_stats.items() %}
+          {% if c > 0 %}
+          <div class="bar-seg" style="background:{{ severity_colors[s] }}; width:{{ (c / total.v * 100)|round(1) }}%">
+            {{ s }} ({{ c }})
+          </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+      <div class="legend">
+        {% for s, c in severity_stats.items() %}
+        <span><i style="background:{{ severity_colors[s] }}"></i>{{ s }} : {{ c }}</span>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="muted">Aucune vulnérabilité à répartir.</p>
+      {% endif %}
+    </div>
+
+    <!-- Reconnaissance -->
+    <h2><span class="ico">🔎</span>Reconnaissance (Playwright)</h2>
+    <div class="card">
+      <table>
+        <tr><th>Élément découvert</th><th>Quantité</th></tr>
+        <tr><td>Pages explorées</td><td>{{ crawl.get('pages', 0) }}</td></tr>
+        <tr><td>URLs injectables (avec paramètres)</td><td>{{ crawl.get('injectable_urls', 0) }}</td></tr>
+        <tr><td>Formulaires détectés</td><td>{{ crawl.get('forms', 0) }}</td></tr>
+        <tr><td>Sinks DOM potentiels</td><td>{{ crawl.get('dom_sinks', 0) }}</td></tr>
+        <tr><td>DOM-XSS confirmés (sondage actif navigateur)</td><td><b style="color:var(--crit)">{{ crawl.get('dom_xss_confirmed', 0) }}</b></td></tr>
+      </table>
+    </div>
+
+    <!-- Couverture par outil -->
+    {% set coverage = scan_meta.get('coverage', {}) %}
+    {% if coverage %}
+    <h2><span class="ico">🧰</span>Couverture des scanners</h2>
+    <div class="card">
+      <p class="muted">Un scanner qui ne trouve rien a quand même tourné — utile à savoir
+        pour ne pas confondre "0 résultat" avec "non exécuté".</p>
+      <table>
+        <tr><th>Outil</th><th>Endpoints testés</th><th>Résultats</th><th>Détail</th></tr>
+        {% if 'XSStrike' in scan_meta.get('scanners', []) %}
+        <tr>
+          <td>XSStrike</td>
+          <td>{{ coverage.get('xsstrike', {}).get('tested', 0) }}</td>
+          <td>{{ coverage.get('xsstrike', {}).get('findings', 0) }}</td>
+          <td class="muted">Analyse de la réponse HTTP brute (URLs GET uniquement)</td>
+        </tr>
+        {% endif %}
+        {% if 'DalFox' in scan_meta.get('scanners', []) %}
+        <tr>
+          <td>DalFox</td>
+          <td>{{ coverage.get('dalfox', {}).get('tested', 0) }}</td>
+          <td>{{ coverage.get('dalfox', {}).get('findings', 0) }}</td>
+          <td class="muted">
+            Analyse de la réponse HTTP brute (URLs GET)
+            {% if coverage.get('dalfox', {}).get('authenticated_forms_tested', 0) %}
+            + {{ coverage['dalfox']['authenticated_forms_tested'] }} formulaire(s) POST
+            authentifié(s) fuzzé(s) avec la session du compte de test
+            {% else %}
+            — aucun formulaire authentifié testé (connexion au compte de test échouée ou
+            aucun formulaire POST détecté)
+            {% endif %}
+          </td>
+        </tr>
+        {% endif %}
+      </table>
+    </div>
+    {% endif %}
+
+    <!-- Endpoints scannés -->
+    {% set endpoints = crawl.get('injectable_urls_list', []) %}
+    {% if endpoints %}
+    <h2><span class="ico">🌐</span>Endpoints scannés par les DAST (XSStrike / DalFox)</h2>
+    <div class="card">
+      <p class="muted">Ce sont les URLs paramétrées effectivement transmises aux scanners
+        (découvertes via liens, formulaires, ou appels API interceptés pendant le crawl).</p>
+      <table>
+        <tr><th>#</th><th>URL</th></tr>
+        {% for u in endpoints %}
+        <tr><td>{{ loop.index }}</td><td><code>{{ u }}</code></td></tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% endif %}
+
+    <!-- Détail vulnérabilités -->
+    <h2><span class="ico">🐞</span>Détail des vulnérabilités</h2>
+    {% if vulnerabilities %}
+    <table>
+      <tr>
+        <th>#</th><th>Sévérité</th><th>Type</th><th>Outil</th>
+        <th>Endpoint</th><th>Paramètre</th><th>Emplacement du payload</th>
+        <th>Confirmé</th><th>Payload &amp; preuve</th>
+      </tr>
+      {% for v in vulnerabilities %}
+      <tr class="vuln-row-{{ v.severity }}">
+        <td>{{ loop.index }}</td>
+        <td><span class="sev sev-{{ v.severity }}">{{ v.severity }}</span></td>
+        <td>{{ v.type }}</td>
+        <td>{{ v.tool }}</td>
+        <td><code>{{ v.url or '—' }}</code></td>
+        <td>{{ v.parameter or '—' }}</td>
+        <td>{{ v.context or '—' }}</td>
+        <td>
+          {% if v.confirmed %}
+          <span class="sev badge-ok">Confirmé ✓</span>
+          {% else %}
+          <span class="sev badge-warn" title="Détection heuristique du scanner, jamais exécutée dans un vrai navigateur">Non confirmé ⚠ (possible faux positif)</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if v.payload %}<code>{{ v.payload }}</code><br>{% endif %}
+          <span class="muted">{{ v.evidence }}</span>
+          {% if v.cwe %}<br><span class="muted">{{ v.cwe }} · confiance : {{ v.confidence }}</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <!-- Preuves visuelles -->
+    <h2><span class="ico">📸</span>Preuves visuelles (capture d'écran par navigateur réel)</h2>
+    <p class="muted">Chaque payload a été rejoué dans un vrai navigateur (Playwright). Une
+      vulnérabilité n'est marquée <strong>Confirmé</strong> que si une boîte de dialogue JS
+      (alert/confirm/prompt) s'est réellement déclenchée — preuve d'exécution, pas seulement
+      un score heuristique du scanner.</p>
+    {% for v in vulnerabilities %}
+    <div class="proof-card proof-{{ v.severity }}">
+      <div class="proof-head">
+        <span class="sev sev-{{ v.severity }}">{{ v.severity }}</span>
+        <strong>#{{ loop.index }}</strong>
+        <span class="muted">{{ v.tool }}</span>
+        <code>{{ v.url or '—' }}</code>
+        {% if v.confirmed %}
+        <span class="sev badge-ok">Confirmé ✓</span>
+        {% else %}
+        <span class="sev badge-warn" title="Détection heuristique du scanner, jamais exécutée dans un vrai navigateur">Non confirmé ⚠ (possible faux positif)</span>
+        {% endif %}
+      </div>
+      <div class="proof-body">
+        {% if v.payload %}<p><code>{{ v.payload }}</code></p>{% endif %}
+        {% if v.verification_note %}<p class="muted">{{ v.verification_note }}</p>{% endif %}
+        {% if v.screenshot_b64 %}
+        <img src="data:image/png;base64,{{ v.screenshot_b64 }}" alt="Capture d'écran de la vérification">
+        {% else %}
+        <p class="muted">Aucune capture disponible (vérification impossible).</p>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+
+    {% else %}
+    <div class="card empty"><span class="big">✅</span>Aucune vulnérabilité XSS détectée sur cette cible.</div>
+    {% endif %}
+
+  </div>
+
+  <footer>
+    Généré automatiquement par <strong>XSS Automation Framework</strong>.<br>
+    Usage réservé aux tests autorisés (OWASP Juice Shop / cibles vous appartenant).
+  </footer>
+</body>
+</html>
