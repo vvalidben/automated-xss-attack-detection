@@ -237,6 +237,31 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     story.append(meta_tbl)
     story.append(Spacer(1, 0.5 * cm))
 
+    # ---- Méthodologie ----
+    story.extend(section_header("🧭 Méthodologie — comment ces vulnérabilités ont été trouvées"))
+    method_rows = [
+        ["1. Reconnaissance", "Le crawler Playwright rend le JavaScript de la cible, découvre "
+         "URLs/formulaires/appels API et repère les sinks DOM. Aucune injection à ce stade."],
+        ["2. Scan automatisé", "XSStrike et DalFox fuzzent chaque paramètre découvert dans des "
+         "conteneurs Docker jetables (URLs GET et formulaires POST authentifiés)."],
+        ["3. Normalisation", "Les sorties hétérogènes sont converties en un schéma unique "
+         "(payload, paramètre, contexte, sévérité) puis dédupliquées."],
+        ["4. Vérification réelle", "Chaque payload est rejoué dans un vrai navigateur en "
+         "reconstruisant l'URL exacte d'injection ; 'Confirmé' = dialogue JS réellement déclenché."],
+    ]
+    method_tbl = Table(
+        [[Paragraph(f"<b>{_esc(a)}</b>", styles["Cell"]), Paragraph(_esc(b), styles["Cell"])]
+         for a, b in method_rows],
+        colWidths=[3.5 * cm, 13.9 * cm],
+    )
+    method_tbl.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, colors.HexColor("#fafbff")]),
+    ]))
+    story.append(method_tbl)
+
     # ---- Graphiques ----
     story.extend(section_header("📊 Répartition des vulnérabilités par sévérité"))
     charts = Table(
@@ -266,6 +291,41 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     sev_tbl.setStyle(TableStyle(sev_style))
     story.append(Spacer(1, 0.3 * cm))
     story.append(sev_tbl)
+
+    # ---- Sinks DOM détectés (inventaire brut) ----
+    sinks = context["crawl"].get("dom_sinks_list") or []
+    if sinks:
+        story.append(PageBreak())
+        story.extend(section_header("🎯 Sinks détectés (surface d'attaque)"))
+        story.append(Paragraph(
+            "Emplacements du code où une donnée arrivant dans le DOM pourrait être "
+            "exécutée sans échappement, détectés/exploités ou non — c'est la moitié "
+            "\"sink\" de l'équation <b>source → sink</b>.",
+            styles["Normal"],
+        ))
+        story.append(Spacer(1, 0.2 * cm))
+        sink_rows = [["Page", "Sink", "Extrait"]] + [
+            [Paragraph(_esc(s.get("page", "")), styles["Cell"]),
+             Paragraph(f"<font color='#8e0000'><b>{_esc(s.get('pattern', ''))}</b></font>", styles["Cell"]),
+             Paragraph(_esc(s.get("snippet", ""))[:140], styles["Cell"])]
+            for s in sinks[:40]
+        ]
+        sink_tbl = Table(sink_rows, colWidths=[5.5 * cm, 3.5 * cm, 8 * cm], repeatRows=1)
+        sink_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
+        ]))
+        story.append(sink_tbl)
+        if len(sinks) > 40:
+            story.append(Paragraph(
+                f"<font size=8 color='#888'>… et {len(sinks) - 40} de plus (liste tronquée).</font>",
+                styles["Normal"],
+            ))
 
     # ---- Endpoints scannés ----
     endpoints = context["crawl"].get("injectable_urls_list") or []
@@ -305,7 +365,7 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
         ))
     else:
         header = ["#", "Sévérité", "Type", "Outil", "Endpoint", "Paramètre",
-                   "Emplacement du payload", "Conf.", "Payload / Preuve"]
+                   "Source → Sink", "Conf.", "Payload / Preuve"]
         rows = [header]
         for i, v in enumerate(context["vulnerabilities"], start=1):
             payload = (v.get("payload") or "")[:120]
@@ -319,6 +379,14 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
                 else "<font color='#999'>non</font>",
                 styles["Cell"],
             )
+            source = v.get("source") or ""
+            sink = v.get("sink") or v.get("context") or ""
+            flow_cell = Paragraph(
+                (f"<font color='#0d47a1'>🔵 {_esc(source)}</font><br/>"
+                 f"<font color='#8e0000'>🎯 {_esc(sink)}</font>") if (source or sink)
+                else _esc(v.get("context", "") or "-"),
+                styles["Cell"],
+            )
             rows.append([
                 str(i),
                 v.get("severity", ""),
@@ -326,7 +394,7 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
                 v.get("tool", ""),
                 Paragraph(_esc(v.get("url", "") or "-"), styles["Cell"]),
                 Paragraph(_esc(v.get("parameter", "") or "-"), styles["Cell"]),
-                Paragraph(_esc(v.get("context", "") or "-"), styles["Cell"]),
+                flow_cell,
                 confirmed_cell,
                 cell,
             ])
@@ -388,27 +456,55 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
                 f"<font size=8>{_esc(v.get('url', '') or '-')}</font>",
                 styles["Normal"],
             ))
+            if v.get("source") or v.get("sink"):
+                story.append(Paragraph(
+                    f"<font size=8 color='#0d47a1'>🔵 Source : {_esc(v.get('source') or '—')}</font>"
+                    "&nbsp;&nbsp;→&nbsp;&nbsp;"
+                    f"<font size=8 color='#8e0000'>🎯 Sink : {_esc(v.get('sink') or v.get('context') or '—')}</font>",
+                    styles["Normal"],
+                ))
+            steps = v.get("reproduction_steps") or []
+            if steps:
+                for j, step in enumerate(steps, start=1):
+                    story.append(Paragraph(
+                        f"<font size=8>{j}. {_esc(step)}</font>", styles["Cell"],
+                    ))
+            if v.get("reproduction_url"):
+                story.append(Paragraph(
+                    f"<font size=7.5 color='#444'>{_esc(v['reproduction_url'])}</font>",
+                    styles["Cell"],
+                ))
             if v.get("payload"):
                 story.append(Paragraph(
                     f"<font size=8>{_esc(v['payload'])}</font>", styles["Cell"],
                 ))
-            if v.get("verification_note"):
+            if v.get("verification_note") and not steps:
                 story.append(Paragraph(
                     f"<font size=8 color='#666'>{_esc(v['verification_note'])}</font>",
                     styles["Cell"],
                 ))
 
-            b64 = v.get("screenshot_b64")
-            if b64:
+            shots = v.get("screenshots") or (
+                [{"label": "Résultat", "image_b64": v["screenshot_b64"]}]
+                if v.get("screenshot_b64") else []
+            )
+            for j, shot in enumerate(shots, start=1):
+                b64 = shot.get("image_b64")
+                if not b64:
+                    continue
                 try:
                     img_bytes = base64.b64decode(b64)
                     img = Image(io.BytesIO(img_bytes))
-                    max_w = 15 * cm
+                    max_w = 10 * cm
                     if img.imageWidth > 0:
                         scale = min(1.0, max_w / img.imageWidth)
                         img.drawWidth = img.imageWidth * scale
                         img.drawHeight = img.imageHeight * scale
                     story.append(Spacer(1, 0.15 * cm))
+                    story.append(Paragraph(
+                        f"<font size=7.5 color='#555'><b>{j}. {_esc(shot.get('label', ''))}</b></font>",
+                        styles["Cell"],
+                    ))
                     story.append(img)
                 except Exception as exc:
                     logger.debug("Capture illisible pour la vulnérabilité #%d : %s", i, exc)

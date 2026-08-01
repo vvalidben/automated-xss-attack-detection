@@ -41,6 +41,10 @@ class Vulnerability:
     evidence: str = ""                 # preuve / contexte
     confidence: str = "unknown"        # high / medium / low
     cwe: str = "CWE-79"                # Cross-Site Scripting
+    method: str = "GET"                # méthode HTTP réellement testée (GET | POST)
+    source_page: str = ""              # page où le formulaire POST a été découvert (si POST)
+    source: str = ""                   # OÙ la donnée attaquant-contrôlée entre (taint source)
+    sink: str = ""                     # OÙ elle est utilisée dangereusement (taint sink)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def dedup_key(self) -> tuple:
@@ -92,6 +96,7 @@ def _parse_dalfox(raw: str, target: str) -> list[Vulnerability]:
             continue
 
         sev = (e.get("severity") or "medium").capitalize()
+        sink_desc = _describe_inject_type(e.get("inject_type", ""))
         vulns.append(
             Vulnerability(
                 tool="dalfox",
@@ -100,9 +105,14 @@ def _parse_dalfox(raw: str, target: str) -> list[Vulnerability]:
                 url=e.get("data") or e.get("evidence") or target,
                 parameter=parameter,
                 payload=payload,
-                context=_describe_inject_type(e.get("inject_type", "")),
+                context=sink_desc,
                 evidence=evidence,
                 confidence="high" if e.get("type", "").upper() in ("V", "VERIFY") else "medium",
+                # `source`/`sink` : le paramètre reste provisoire ici (GET par
+                # défaut) — `parse_scan_results` le corrige en "POST" quand la
+                # découverte vient de run_dalfox_authenticated_post().
+                source=f"Paramètre '{parameter}' (GET)" if parameter else "Paramètre non identifié",
+                sink=sink_desc or "Sink non précisé par DalFox",
                 raw=e,
             )
         )
@@ -183,6 +193,11 @@ def _parse_xsstrike(raw: str, target: str) -> list[Vulnerability]:
                 ),
                 evidence=f"Efficiency={eff}%, Confidence={conf}/10",
                 confidence="high" if conf >= 8 else "medium" if conf >= 4 else "low",
+                source=(
+                    f"Paramètre d'URL '{param}' (GET)" if param
+                    else "Paramètre de requête URL (GET)"
+                ),
+                sink="Corps de la réponse HTTP (reflet HTML non échappé)",
                 raw=dict(current),
             )
         )
@@ -313,11 +328,25 @@ def parse_scan_results(scan_results: list) -> list[dict[str, Any]]:
 
         try:
             if tool == "dalfox":
-                all_vulns.extend(_parse_dalfox(raw, target))
+                new_vulns = _parse_dalfox(raw, target)
             elif tool == "xsstrike":
-                all_vulns.extend(_parse_xsstrike(raw, target))
+                new_vulns = _parse_xsstrike(raw, target)
             else:
                 logger.debug("Outil inconnu, ignoré : %s", tool)
+                new_vulns = []
+            # La méthode HTTP réellement testée (GET par défaut, POST pour le
+            # DalFox authentifié) vient du ScanResult, pas de la sortie brute
+            # du scanner : on la reporte ici pour que le rapport sache si le
+            # payload s'envoie via une URL ou via un corps de formulaire.
+            method = getattr(res, "method", "GET")
+            source_page = getattr(res, "source_page", "")
+            for v in new_vulns:
+                v.method = method
+                v.source_page = source_page
+                if method == "POST":
+                    where = source_page or v.url
+                    v.source = f"Champ de formulaire '{v.parameter}' (POST, {where})"
+            all_vulns.extend(new_vulns)
         except Exception as exc:  # robustesse : un parseur ne doit pas tout casser
             logger.error("Échec du parsing pour %s : %s", tool, exc)
 

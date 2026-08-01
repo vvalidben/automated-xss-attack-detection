@@ -53,6 +53,8 @@ class ScanResult:
     timed_out: bool = False
     error: str | None = None           # erreur d'orchestration (image manquante…)
     findings_format: str = "text"      # "json" | "jsonlines" | "text"
+    method: str = "GET"                # méthode HTTP réellement testée (GET | POST)
+    source_page: str = ""              # page où le formulaire POST a été découvert (si POST)
 
     def ok(self) -> bool:
         return self.error is None and not self.timed_out
@@ -191,16 +193,26 @@ class ScannerManager:
         DalFox : scanner XSS rapide. `--format json` donne une sortie
         structurée, idéale pour le parsing.
         `url` = mode analyse d'une URL unique avec ses paramètres.
+
+        `--remote-payloads portswigger,payloadbox` : corpus communautaire
+        élargi en plus des payloads intégrés de DalFox — demande explicite
+        de tester un large éventail de payloads sur chaque endpoint, pas
+        seulement le jeu par défaut. Appliqué à TOUS les scans GET (pas
+        seulement au POST authentifié comme avant), au prix d'un scan un
+        peu plus long par endpoint (~+30-40s, resté sous SCANNER_TIMEOUT_S).
         """
         target = self._rewrite_host(url)
-        cmd = ["url", target, "--format", "json", "--silence", "--no-color", "--skip-bav"]
+        cmd = [
+            "url", target, "--format", "json", "--silence", "--no-color", "--skip-bav",
+            "--remote-payloads", "portswigger,payloadbox",
+        ]
         res = self._run_container(config.DALFOX_IMAGE, cmd, "dalfox", target)
         res.findings_format = "json"
         return res
 
     def run_dalfox_authenticated_post(
         self, url: str, post_data: str, auth_token: str,
-        cookie_name: str = "token",
+        cookie_name: str = "token", source_page: str = "",
     ) -> ScanResult:
         """
         DalFox en mode POST authentifié, pour les formulaires qui exigent une
@@ -233,6 +245,8 @@ class ScannerManager:
         ]
         res = self._run_container(config.DALFOX_IMAGE, cmd, "dalfox", target)
         res.findings_format = "json"
+        res.method = "POST"
+        res.source_page = source_page
         return res
 
     # ---- Pipeline complet ---------------------------------------------

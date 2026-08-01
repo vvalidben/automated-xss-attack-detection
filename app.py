@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import config
-from core.crawler import PlaywrightCrawler
+from core.crawler import PlaywrightCrawler, DOM_XSS_PAYLOADS
 from core.scanner_manager import ScannerManager
 from core.parser import parse_scan_results
 from core.verifier import verify_vulnerabilities
@@ -106,6 +106,18 @@ async def run_pipeline(scan_id: str, target: str, use_xsstrike: bool, use_dalfox
             # rapport puisse afficher les endpoints réellement scannés.
             "urls_list": crawl_result.urls,
             "injectable_urls_list": crawl_result.injectable_urls,
+            # Inventaire brut des sinks DOM détectés (page/pattern/extrait) :
+            # surface "sink" complète, y compris les sinks jamais exploités
+            # avec succès — utile pour la section Sources -> Sinks du rapport.
+            "dom_sinks_list": [
+                {"page": s.page, "pattern": s.pattern, "snippet": s.snippet}
+                for s in crawl_result.dom_sinks
+            ],
+            # Taille du corpus de payloads utilisé pour le sondage actif en
+            # navigateur réel (voir core.crawler.DOM_XSS_PAYLOADS) — affiché
+            # dans le rapport pour que la couverture réelle soit visible,
+            # pas seulement le résultat final.
+            "dom_probe_payload_count": len(DOM_XSS_PAYLOADS),
         }
         state.update(crawl_summary=crawl_summary)
 
@@ -152,6 +164,7 @@ async def run_pipeline(scan_id: str, target: str, use_xsstrike: bool, use_dalfox
                     await asyncio.to_thread(
                         manager.run_dalfox_authenticated_post,
                         form.action, post_data, crawl_result.auth_token,
+                        "token", form.source_page,
                     )
                 )
                 auth_forms_scanned += 1
