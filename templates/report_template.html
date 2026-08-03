@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rapport XSS — {{ target }}</title>
+  <title>XSS Report — {{ target }}</title>
   <style>
     :root {
       --primary:#1a237e; --accent:#7c4dff; --bg:#eef0f9; --card:#fff;
@@ -136,10 +136,10 @@
   <header>
     <div class="htop">
       <span class="shield">🛡️</span>
-      <h1>Rapport d'Analyse XSS Automatisée</h1>
+      <h1>Automated XSS Analysis Report</h1>
     </div>
     <div class="meta">
-      <span class="chip">🎯 Cible : <b>{{ target }}</b></span>
+      <span class="chip">🎯 Target: <b>{{ target }}</b></span>
       <span class="chip">🕒 {{ generated_at }}</span>
       {% if scan_meta and scan_meta.get('scanners') %}
       <span class="chip">🧰 {{ scan_meta.get('scanners') | join(' + ') }}</span>
@@ -153,74 +153,73 @@
     <div class="grid">
       <div class="card kpi k-vulns">
         <div class="num">{{ total_vulns }}</div>
-        <div class="lbl">Vulnérabilités</div>
+        <div class="lbl">Vulnerabilities</div>
       </div>
       <div class="card kpi k-pages">
         <div class="num">{{ crawl.get('pages', '—') }}</div>
-        <div class="lbl">Pages crawlées</div>
+        <div class="lbl">Pages crawled</div>
       </div>
       <div class="card kpi k-score">
         <div class="num">{{ risk_score }}</div>
-        <div class="lbl">Score de risque</div>
+        <div class="lbl">Risk score</div>
       </div>
       <div class="card kpi">
-        <div class="lbl" style="margin-bottom:10px;">Niveau de risque</div>
-        {% set rc = '#8e0000' if risk_level == 'Élevé' else ('#f0ad4e' if risk_level == 'Modéré' else ('#777777' if 'faux positifs' in risk_level else '#00b871')) %}
-        {% set ri = '🔴' if risk_level == 'Élevé' else ('🟠' if risk_level == 'Modéré' else ('⚪' if 'faux positifs' in risk_level else '🟢')) %}
+        <div class="lbl" style="margin-bottom:10px;">Risk level</div>
+        {% set rc = '#8e0000' if risk_level == 'High' else ('#f0ad4e' if risk_level == 'Moderate' else ('#777777' if 'false positives' in risk_level else '#00b871')) %}
+        {% set ri = '🔴' if risk_level == 'High' else ('🟠' if risk_level == 'Moderate' else ('⚪' if 'false positives' in risk_level else '🟢')) %}
         <span class="risk-badge" style="background:{{ rc }}">{{ ri }} {{ risk_level }}</span>
         {% if unconfirmed_count %}
         <p class="muted" style="margin-top:8px;font-size:.85em;">
-          Basé sur {{ confirmed_count }} vulnérabilité(s) confirmée(s) par exécution réelle.
-          {{ unconfirmed_count }} signal(aux) heuristique(s) supplémentaire(s) non confirmé(s)
-          (possibles faux positifs) — voir tableau ci-dessous.
+          Based on {{ confirmed_count }} vulnerabilit{{ 'y' if confirmed_count == 1 else 'ies' }} confirmed by real execution.
+          {{ unconfirmed_count }} additional heuristic signal{{ 's' if unconfirmed_count != 1 else '' }} not confirmed
+          (possible false positives) — see table below.
         </p>
         {% endif %}
       </div>
     </div>
 
-    <!-- Méthodologie -->
-    <h2><span class="ico">🧭</span>Méthodologie — comment ces vulnérabilités ont été trouvées</h2>
+    <!-- Methodology -->
+    <h2><span class="ico">🧭</span>Methodology — how these vulnerabilities were found</h2>
     <div class="card">
       <div class="method-grid">
         <div class="method-step">
           <span class="n">1</span>
           <h4>Reconnaissance (Playwright)</h4>
-          <p>Le crawler rend réellement le JavaScript de la cible, découvre les
-          URLs internes, extrait les paramètres de formulaires/liens/appels API
-          et repère les sinks DOM (innerHTML, eval…). Il n'injecte rien à ce
-          stade : il cartographie uniquement la surface d'attaque.</p>
+          <p>The crawler actually renders the target's JavaScript, discovers
+          internal URLs, extracts form/link/API-call parameters, and spots
+          DOM sinks (innerHTML, eval…). It injects nothing at this stage: it
+          only maps the attack surface.</p>
         </div>
         <div class="method-step">
           <span class="n">2</span>
-          <h4>Scan automatisé (XSStrike / DalFox)</h4>
-          <p>Chaque paramètre découvert est fuzzé dans un conteneur Docker
-          jetable : XSStrike teste des variantes de payloads XSS par similarité
-          de réponse, DalFox injecte et analyse le contexte de réflexion
-          (HTML, attribut, JS) — y compris sur les formulaires POST authentifiés.</p>
+          <h4>Automated scan (XSStrike / DalFox)</h4>
+          <p>Each discovered parameter is fuzzed inside a disposable Docker
+          container: XSStrike tests XSS payload variants by response
+          similarity, DalFox injects and analyzes the reflection context
+          (HTML, attribute, JS) — including authenticated POST forms.</p>
         </div>
         <div class="method-step">
           <span class="n">3</span>
-          <h4>Normalisation (parser.py)</h4>
-          <p>Les sorties hétérogènes (texte XSStrike, JSON DalFox) sont
-          converties en un schéma unique (payload, paramètre, contexte,
-          sévérité), dédupliquées pour éviter les doublons entre outils.</p>
+          <h4>Normalization (parser.py)</h4>
+          <p>Heterogeneous outputs (XSStrike text, DalFox JSON) are converted
+          into a single schema (payload, parameter, context, severity), then
+          deduplicated to avoid overlap between tools.</p>
         </div>
         <div class="method-step">
           <span class="n">4</span>
-          <h4>Vérification par exécution réelle</h4>
-          <p>Chaque payload retenu est rejoué dans un vrai navigateur
-          (Playwright) en reconstruisant l'URL exacte d'injection. Une
-          vulnérabilité n'est marquée <strong>Confirmé</strong> que si une
-          boîte de dialogue JS s'est réellement déclenchée — pas seulement un
-          score heuristique. Le détail par vulnérabilité ci-dessous montre
-          l'URL de reproduction exacte et les étapes suivies.</p>
+          <h4>Real-execution verification</h4>
+          <p>Each retained payload is replayed in a real browser (Playwright)
+          by reconstructing the exact injection URL. A vulnerability is only
+          marked <strong>Confirmed</strong> if a JS dialog actually fired —
+          not just a heuristic score. The per-vulnerability detail below
+          shows the exact reproduction URL and the steps followed.</p>
         </div>
       </div>
     </div>
 
-    <!-- Répartition sévérité -->
+    <!-- Severity breakdown -->
     <div class="card">
-      <h2 style="margin-top:0"><span class="ico">📊</span>Répartition par sévérité</h2>
+      <h2 style="margin-top:0"><span class="ico">📊</span>Breakdown by severity</h2>
       {% set total = namespace(v=0) %}
       {% for s, c in severity_stats.items() %}{% set total.v = total.v + c %}{% endfor %}
       {% if total.v > 0 %}
@@ -235,11 +234,11 @@
       </div>
       <div class="legend">
         {% for s, c in severity_stats.items() %}
-        <span><i style="background:{{ severity_colors[s] }}"></i>{{ s }} : {{ c }}</span>
+        <span><i style="background:{{ severity_colors[s] }}"></i>{{ s }}: {{ c }}</span>
         {% endfor %}
       </div>
       {% else %}
-      <p class="muted">Aucune vulnérabilité à répartir.</p>
+      <p class="muted">No vulnerabilities to break down.</p>
       {% endif %}
     </div>
 
@@ -247,28 +246,28 @@
     <h2><span class="ico">🔎</span>Reconnaissance (Playwright)</h2>
     <div class="card">
       <table>
-        <tr><th>Élément découvert</th><th>Quantité</th></tr>
-        <tr><td>Pages explorées</td><td>{{ crawl.get('pages', 0) }}</td></tr>
-        <tr><td>URLs injectables (avec paramètres)</td><td>{{ crawl.get('injectable_urls', 0) }}</td></tr>
-        <tr><td>Formulaires détectés</td><td>{{ crawl.get('forms', 0) }}</td></tr>
-        <tr><td>Sinks DOM potentiels</td><td>{{ crawl.get('dom_sinks', 0) }}</td></tr>
-        <tr><td>Payloads du corpus de sondage actif (par champ/URL testé)</td><td>{{ crawl.get('dom_probe_payload_count', 0) }}</td></tr>
-        <tr><td>DOM-XSS confirmés (sondage actif navigateur)</td><td><b style="color:var(--crit)">{{ crawl.get('dom_xss_confirmed', 0) }}</b></td></tr>
+        <tr><th>Discovered item</th><th>Count</th></tr>
+        <tr><td>Pages explored</td><td>{{ crawl.get('pages', 0) }}</td></tr>
+        <tr><td>Injectable URLs (with parameters)</td><td>{{ crawl.get('injectable_urls', 0) }}</td></tr>
+        <tr><td>Forms detected</td><td>{{ crawl.get('forms', 0) }}</td></tr>
+        <tr><td>Potential DOM sinks</td><td>{{ crawl.get('dom_sinks', 0) }}</td></tr>
+        <tr><td>Active-probe payload corpus size (per field/URL tested)</td><td>{{ crawl.get('dom_probe_payload_count', 0) }}</td></tr>
+        <tr><td>Confirmed DOM-XSS (active browser probing)</td><td><b style="color:var(--crit)">{{ crawl.get('dom_xss_confirmed', 0) }}</b></td></tr>
       </table>
     </div>
 
-    <!-- Sinks DOM détectés (inventaire brut) -->
+    <!-- Detected sinks (raw inventory) -->
     {% set sinks = crawl.get('dom_sinks_list', []) %}
     {% if sinks %}
-    <h2><span class="ico">🎯</span>Sinks détectés (surface d'attaque)</h2>
+    <h2><span class="ico">🎯</span>Detected sinks (attack surface)</h2>
     <div class="card">
-      <p class="muted">Emplacements du code où une donnée arrivant dans le DOM pourrait être
-        exécutée sans échappement — détectés par analyse du HTML/JS rendu, qu'ils aient été
-        exploités avec succès ou non. C'est la moitié "sink" de l'équation
-        <b>source → sink</b> : chaque vulnérabilité confirmée ci-dessous relie un point d'entrée
-        (source) à l'un de ces emplacements.</p>
+      <p class="muted">Places in the code where data reaching the DOM could be executed without
+        escaping — detected by analyzing the rendered HTML/JS, whether or not they were
+        successfully exploited. This is the "sink" half of the
+        <b>source → sink</b> equation: each confirmed vulnerability below links an entry point
+        (source) to one of these locations.</p>
       <table>
-        <tr><th>Page</th><th>Sink</th><th>Extrait de code</th></tr>
+        <tr><th>Page</th><th>Sink</th><th>Code excerpt</th></tr>
         {% for s in sinks[:40] %}
         <tr>
           <td><code>{{ s.page }}</code></td>
@@ -278,26 +277,26 @@
         {% endfor %}
       </table>
       {% if sinks | length > 40 %}
-      <p class="muted" style="margin-top:8px;">… et {{ sinks | length - 40 }} de plus (liste tronquée pour la lisibilité).</p>
+      <p class="muted" style="margin-top:8px;">… and {{ sinks | length - 40 }} more (list truncated for readability).</p>
       {% endif %}
     </div>
     {% endif %}
 
-    <!-- Couverture par outil -->
+    <!-- Scanner coverage -->
     {% set coverage = scan_meta.get('coverage', {}) %}
     {% if coverage %}
-    <h2><span class="ico">🧰</span>Couverture des scanners</h2>
+    <h2><span class="ico">🧰</span>Scanner coverage</h2>
     <div class="card">
-      <p class="muted">Un scanner qui ne trouve rien a quand même tourné — utile à savoir
-        pour ne pas confondre "0 résultat" avec "non exécuté".</p>
+      <p class="muted">A scanner that finds nothing still ran — worth knowing so "0 results" isn't
+        confused with "never executed".</p>
       <table>
-        <tr><th>Outil</th><th>Endpoints testés</th><th>Résultats</th><th>Détail</th></tr>
+        <tr><th>Tool</th><th>Endpoints tested</th><th>Results</th><th>Detail</th></tr>
         {% if 'XSStrike' in scan_meta.get('scanners', []) %}
         <tr>
           <td>XSStrike</td>
           <td>{{ coverage.get('xsstrike', {}).get('tested', 0) }}</td>
           <td>{{ coverage.get('xsstrike', {}).get('findings', 0) }}</td>
-          <td class="muted">Analyse de la réponse HTTP brute (URLs GET uniquement)</td>
+          <td class="muted">Raw HTTP response analysis (GET URLs only)</td>
         </tr>
         {% endif %}
         {% if 'DalFox' in scan_meta.get('scanners', []) %}
@@ -306,15 +305,15 @@
           <td>{{ coverage.get('dalfox', {}).get('tested', 0) }}</td>
           <td>{{ coverage.get('dalfox', {}).get('findings', 0) }}</td>
           <td class="muted">
-            Analyse de la réponse HTTP brute (URLs GET), payloads intégrés de DalFox
-            + corpus communautaire élargi (<b>PortSwigger + PayloadBox</b>, chargé à
-            chaque endpoint via <code>--remote-payloads</code>)
+            Raw HTTP response analysis (GET URLs), DalFox's built-in payloads
+            + expanded community corpus (<b>PortSwigger + PayloadBox</b>, loaded for
+            every endpoint via <code>--remote-payloads</code>)
             {% if coverage.get('dalfox', {}).get('authenticated_forms_tested', 0) %}
-            + {{ coverage['dalfox']['authenticated_forms_tested'] }} formulaire(s) POST
-            authentifié(s) fuzzé(s) avec la session du compte de test (même corpus élargi)
+            + {{ coverage['dalfox']['authenticated_forms_tested'] }} authenticated POST
+            form(s) fuzzed with the test account's session (same expanded corpus)
             {% else %}
-            — aucun formulaire authentifié testé (connexion au compte de test échouée ou
-            aucun formulaire POST détecté)
+            — no authenticated form tested (test-account login failed or
+            no POST form detected)
             {% endif %}
           </td>
         </tr>
@@ -323,13 +322,13 @@
     </div>
     {% endif %}
 
-    <!-- Endpoints scannés -->
+    <!-- Scanned endpoints -->
     {% set endpoints = crawl.get('injectable_urls_list', []) %}
     {% if endpoints %}
-    <h2><span class="ico">🌐</span>Endpoints scannés par les DAST (XSStrike / DalFox)</h2>
+    <h2><span class="ico">🌐</span>Endpoints scanned by the DAST tools (XSStrike / DalFox)</h2>
     <div class="card">
-      <p class="muted">Ce sont les URLs paramétrées effectivement transmises aux scanners
-        (découvertes via liens, formulaires, ou appels API interceptés pendant le crawl).</p>
+      <p class="muted">These are the parameterized URLs actually passed to the scanners
+        (discovered via links, forms, or API calls intercepted during the crawl).</p>
       <table>
         <tr><th>#</th><th>URL</th></tr>
         {% for u in endpoints %}
@@ -339,14 +338,14 @@
     </div>
     {% endif %}
 
-    <!-- Détail vulnérabilités -->
-    <h2><span class="ico">🐞</span>Détail des vulnérabilités</h2>
+    <!-- Vulnerability detail -->
+    <h2><span class="ico">🐞</span>Vulnerability detail</h2>
     {% if vulnerabilities %}
     <table>
       <tr>
-        <th>#</th><th>Sévérité</th><th>Type</th><th>Outil</th>
-        <th>Endpoint</th><th>Paramètre</th><th>Source → Sink</th>
-        <th>Confirmé</th><th>Payload &amp; preuve</th>
+        <th>#</th><th>Severity</th><th>Type</th><th>Tool</th>
+        <th>Endpoint</th><th>Parameter</th><th>Source → Sink</th>
+        <th>Confirmed</th><th>Payload &amp; evidence</th>
       </tr>
       {% for v in vulnerabilities %}
       <tr class="vuln-row-{{ v.severity }}">
@@ -366,26 +365,26 @@
         </td>
         <td>
           {% if v.confirmed %}
-          <span class="sev badge-ok">Confirmé ✓</span>
+          <span class="sev badge-ok">Confirmed ✓</span>
           {% else %}
-          <span class="sev badge-warn" title="Détection heuristique du scanner, jamais exécutée dans un vrai navigateur">Non confirmé ⚠ (possible faux positif)</span>
+          <span class="sev badge-warn" title="Heuristic detection from the scanner, never executed in a real browser">Not confirmed ⚠ (possible false positive)</span>
           {% endif %}
         </td>
         <td>
           {% if v.payload %}<code>{{ v.payload }}</code><br>{% endif %}
           <span class="muted">{{ v.evidence }}</span>
-          {% if v.cwe %}<br><span class="muted">{{ v.cwe }} · confiance : {{ v.confidence }}</span>{% endif %}
+          {% if v.cwe %}<br><span class="muted">{{ v.cwe }} · confidence: {{ v.confidence }}</span>{% endif %}
         </td>
       </tr>
       {% endfor %}
     </table>
 
-    <!-- Preuves visuelles -->
-    <h2><span class="ico">📸</span>Preuves visuelles (capture d'écran par navigateur réel)</h2>
-    <p class="muted">Chaque payload a été rejoué dans un vrai navigateur (Playwright). Une
-      vulnérabilité n'est marquée <strong>Confirmé</strong> que si une boîte de dialogue JS
-      (alert/confirm/prompt) s'est réellement déclenchée — preuve d'exécution, pas seulement
-      un score heuristique du scanner.</p>
+    <!-- Visual evidence -->
+    <h2><span class="ico">📸</span>Visual evidence (real-browser screenshots)</h2>
+    <p class="muted">Each payload was replayed in a real browser (Playwright). A
+      vulnerability is only marked <strong>Confirmed</strong> if a JS dialog
+      (alert/confirm/prompt) actually fired — proof of execution, not just a
+      heuristic score from the scanner.</p>
     {% for v in vulnerabilities %}
     <div class="proof-card proof-{{ v.severity }}">
       <div class="proof-head">
@@ -394,17 +393,17 @@
         <span class="muted">{{ v.tool }}</span>
         <code>{{ v.url or '—' }}</code>
         {% if v.confirmed %}
-        <span class="sev badge-ok">Confirmé ✓</span>
+        <span class="sev badge-ok">Confirmed ✓</span>
         {% else %}
-        <span class="sev badge-warn" title="Détection heuristique du scanner, jamais exécutée dans un vrai navigateur">Non confirmé ⚠ (possible faux positif)</span>
+        <span class="sev badge-warn" title="Heuristic detection from the scanner, never executed in a real browser">Not confirmed ⚠ (possible false positive)</span>
         {% endif %}
       </div>
       <div class="proof-body">
         {% if v.source or v.sink %}
         <div class="flow">
-          <span class="tag tag-source">🔵 Source : {{ v.source or '—' }}</span>
+          <span class="tag tag-source">🔵 Source: {{ v.source or '—' }}</span>
           <span class="arrow">→</span>
-          <span class="tag tag-sink">🎯 Sink : {{ v.sink or v.context or '—' }}</span>
+          <span class="tag tag-sink">🎯 Sink: {{ v.sink or v.context or '—' }}</span>
         </div>
         {% endif %}
         {% if v.reproduction_steps %}
@@ -419,7 +418,7 @@
         {% endif %}
         {% if v.payload %}<p><code>{{ v.payload }}</code></p>{% endif %}
         {% if v.verification_note %}<p class="muted">{{ v.verification_note }}</p>{% endif %}
-        {% set shots = v.screenshots if v.screenshots else ([{"label": "Résultat", "image_b64": v.screenshot_b64}] if v.screenshot_b64 else []) %}
+        {% set shots = v.screenshots if v.screenshots else ([{"label": "Result", "image_b64": v.screenshot_b64}] if v.screenshot_b64 else []) %}
         {% if shots %}
         <div class="shot-gallery">
           {% for shot in shots %}
@@ -430,21 +429,21 @@
           {% endfor %}
         </div>
         {% else %}
-        <p class="muted">Aucune capture disponible (vérification impossible).</p>
+        <p class="muted">No screenshot available (verification not possible).</p>
         {% endif %}
       </div>
     </div>
     {% endfor %}
 
     {% else %}
-    <div class="card empty"><span class="big">✅</span>Aucune vulnérabilité XSS détectée sur cette cible.</div>
+    <div class="card empty"><span class="big">✅</span>No XSS vulnerability was detected on this target.</div>
     {% endif %}
 
   </div>
 
   <footer>
-    Généré automatiquement par <strong>XSS Automation Framework</strong>.<br>
-    Usage réservé aux tests autorisés (OWASP Juice Shop / cibles vous appartenant).
+    Automatically generated by <strong>XSS Automation Framework</strong>.<br>
+    For authorized testing only (OWASP Juice Shop / targets you own).
   </footer>
 </body>
 </html>

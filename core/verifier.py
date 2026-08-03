@@ -33,7 +33,7 @@ logger = logging.getLogger("verifier")
 # se contente de l'instruction générique (coller l'URL). Aide à répondre
 # concrètement à "où" pour les cas les plus fréquents (barre de recherche...).
 _UI_HINTS: dict[str, str] = {
-    "q": "la barre de recherche (icône loupe en haut de l'application)",
+    "q": "the search bar (magnifying-glass icon at the top of the app)",
 }
 
 
@@ -61,11 +61,10 @@ async def _annotate_confirmed(page) -> None:
                 if (document.getElementById(id)) return;
                 const b = document.createElement('div');
                 b.id = id;
-                b.textContent = '✅ XSS CONFIRME — une boite de dialogue JS '
-                    + '(alert/confirm/prompt) vient de se declencher ici. Les dialogues '
-                    + 'natifs du navigateur ne peuvent pas apparaitre sur une capture '
-                    + 'd\\'ecran : ce bandeau, ajoute par l\\'outil apres coup, marque le '
-                    + 'moment de l\\'execution.';
+                b.textContent = '✅ XSS CONFIRMED — a JS dialog '
+                    + '(alert/confirm/prompt) just fired here. Native browser dialogs '
+                    + 'cannot appear in a screenshot: this banner, added by the tool '
+                    + 'afterwards, marks the moment of execution.';
                 b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;'
                     + 'background:#c0392b;color:#fff;font:bold 13px/1.5 sans-serif;'
                     + 'padding:10px 18px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.5);';
@@ -112,77 +111,77 @@ def _build_reproduction_steps(vuln: dict[str, Any], test_url: str | None) -> lis
 
     if tool == "xsstrike":
         steps.append(
-            f"Découverte : le crawler Playwright a repéré le paramètre d'URL "
-            f"'{param}' sur {url} comme point d'injection (lien ou formulaire GET)."
+            f"Discovery: the Playwright crawler spotted the URL parameter "
+            f"'{param}' on {url} as an injection point (link or GET form)."
         )
         steps.append(
-            "Test automatisé : XSStrike a fuzzé ce paramètre avec plusieurs "
-            "variantes de payloads XSS (contournement de contexte/WAF) et "
-            "retenu celle au meilleur score d'efficacité/confiance."
+            "Automated test: XSStrike fuzzed this parameter with several "
+            "XSS payload variants (context/WAF bypass) and kept the one "
+            "with the best efficiency/confidence score."
         )
     elif tool == "dalfox" and method == "POST":
         steps.append(
-            f"Découverte : le crawler a trouvé un formulaire POST "
-            f"(champ '{param}') sur {source_page or url}, et s'est connecté "
-            "avec un compte de test jetable pour obtenir une session valide."
+            f"Discovery: the crawler found a POST form "
+            f"(field '{param}') on {source_page or url}, and logged in "
+            "with a disposable test account to get a valid session."
         )
         steps.append(
-            "Test automatisé : DalFox a rejoué le jeton de session dans un "
-            f"cookie et fuzzé le corps de la requête POST envoyée à {url} "
-            "avec son corpus de payloads (dont PortSwigger + PayloadBox)."
+            "Automated test: DalFox replayed the session token in a "
+            f"cookie and fuzzed the POST request body sent to {url} "
+            "with its payload corpus (including PortSwigger + PayloadBox)."
         )
     elif tool == "dalfox":
         steps.append(
-            f"Découverte : le paramètre '{param}' sur {url} a été transmis à "
-            "DalFox comme candidat testable (URL paramétrée interceptée "
-            "pendant le crawl)."
+            f"Discovery: the parameter '{param}' on {url} was passed to "
+            "DalFox as a testable candidate (parameterized URL intercepted "
+            "during the crawl)."
         )
         steps.append(
-            "Test automatisé : DalFox a injecté un jeu de payloads XSS et "
-            f"détecté une réflexion dans le contexte : {context or 'non précisé'}."
+            "Automated test: DalFox injected a set of XSS payloads and "
+            f"detected a reflection in the context: {context or 'unspecified'}."
         )
     else:
-        steps.append(f"Point d'injection identifié : paramètre '{param}' sur {url}.")
+        steps.append(f"Injection point identified: parameter '{param}' on {url}.")
 
     steps.append(
-        f"Payload retenu : {payload}" if payload
-        else "Aucun payload distinct associé (signal heuristique du scanner)."
+        f"Payload used: {payload}" if payload
+        else "No distinct payload associated (heuristic signal from the scanner)."
     )
 
     if method == "POST":
         where = source_page or url
         steps.append(
-            f"OÙ : ce n'est PAS un paramètre d'URL — c'est le champ "
-            f"'{param}' d'un formulaire POST, visible sur {where}. Coller "
-            "le payload dans une URL ne le déclencherait pas."
+            f"WHERE: this is NOT a URL parameter — it's the "
+            f"'{param}' field of a POST form, visible on {where}. Pasting "
+            "the payload into a URL would not trigger it."
         )
         steps.append(
-            f"COMMENT : connecte-toi avec un compte de test, ouvre {where}, "
-            f"saisis le payload directement dans le champ '{param}', puis "
-            "soumets le formulaire (bouton d'enregistrement/envoi)."
+            f"HOW: log in with a test account, open {where}, "
+            f"type the payload directly into the '{param}' field, then "
+            "submit the form (save/send button)."
         )
         steps.append(
-            "Reproduction technique équivalente (requête brute, ce que "
-            f"DalFox a fait) : POST {url} avec le cookie de session et le "
-            f"corps '{param}=<payload>'."
+            "Equivalent technical reproduction (raw request, what "
+            f"DalFox did): POST {url} with the session cookie and the "
+            f"body '{param}=<payload>'."
         )
     elif test_url:
         hint = _UI_HINTS.get(param)
         steps.append(
-            f"OÙ : la barre d'adresse du navigateur (paramètre d'URL '{param}')."
+            f"WHERE: the browser's address bar (URL parameter '{param}')."
         )
-        steps.append(f"COMMENT : coller cette URL et appuyer sur Entrée → {test_url}")
+        steps.append(f"HOW: paste this URL and press Enter → {test_url}")
         if hint:
             steps.append(
-                f"Astuce UI : ce paramètre correspond généralement à {hint} — "
-                "tu peux aussi taper le payload directement là plutôt que "
-                "de modifier l'URL à la main."
+                f"UI tip: this parameter usually maps to {hint} — "
+                "you can also type the payload directly there instead of "
+                "editing the URL by hand."
             )
     else:
         steps.append(
-            "Reproduction manuelle impossible automatiquement (paramètre ou "
-            "URL manquant) — utiliser le payload et le contexte ci-dessus "
-            "pour tester à la main."
+            "Manual reproduction isn't possible automatically (missing "
+            "parameter or URL) — use the payload and context above to "
+            "test by hand."
         )
 
     return steps
@@ -202,10 +201,10 @@ async def _verify_one(browser, vuln: dict[str, Any]) -> None:
     if (vuln.get("method") or "GET").upper() == "POST":
         vuln["reproduction_url"] = ""
         vuln["verification_note"] = (
-            "Vérification automatique par navigateur non applicable : ce "
-            "payload cible un champ de formulaire POST authentifié, pas un "
-            "paramètre d'URL. Le signal de confiance vient du fuzzing "
-            "authentifié effectué par DalFox (voir étapes de reproduction)."
+            "Automatic browser verification not applicable: this "
+            "payload targets an authenticated POST form field, not a "
+            "URL parameter. The confidence signal comes from DalFox's own "
+            "authenticated fuzzing (see reproduction steps)."
         )
         vuln["reproduction_steps"] = _build_reproduction_steps(vuln, None)
         return
@@ -217,7 +216,7 @@ async def _verify_one(browser, vuln: dict[str, Any]) -> None:
 
     if not test_url:
         vuln["verification_note"] = (
-            "Vérification impossible : paramètre ou URL manquant."
+            "Verification not possible: missing parameter or URL."
         )
         vuln["reproduction_steps"] = _build_reproduction_steps(vuln, test_url)
         return
@@ -249,11 +248,11 @@ async def _verify_one(browser, vuln: dict[str, Any]) -> None:
                     wait_until="domcontentloaded",
                 )
                 await page.wait_for_timeout(800)
-                shot = await _snap(page, "Avant injection (page originale)")
+                shot = await _snap(page, "Before injection (original page)")
                 if shot:
                     screenshots.append(shot)
             except Exception:
-                pass  # best-effort : l'échec du "avant" ne bloque pas la vérification
+                pass  # best-effort: a failed "before" shot doesn't block verification
 
         await page.goto(
             test_url, timeout=config.CRAWLER_PAGE_TIMEOUT_MS,
@@ -262,32 +261,32 @@ async def _verify_one(browser, vuln: dict[str, Any]) -> None:
         await page.wait_for_timeout(1500)
         vuln["confirmed"] = dialog_fired
         vuln["verification_note"] = (
-            "Payload exécuté : une boîte de dialogue JS (alert/confirm/prompt) "
-            "s'est déclenchée dans un vrai navigateur." if dialog_fired else
-            "Aucune exécution JS détectée dans un vrai navigateur : "
-            "probable faux positif (payload non exécutable dans ce contexte, "
-            "ex. échappé/encodé, ou reflété dans une réponse JSON non rendue)."
+            "Payload executed: a JS dialog (alert/confirm/prompt) "
+            "actually fired in a real browser." if dialog_fired else
+            "No JS execution detected in a real browser: "
+            "likely false positive (payload not executable in this context, "
+            "e.g. escaped/encoded, or reflected in an unrendered JSON response)."
         )
         if dialog_fired:
             await _annotate_confirmed(page)
         result_shot = await _snap(
             page,
-            "Résultat (payload exécuté — bandeau ajouté par l'outil)" if dialog_fired
-            else "Résultat (après injection, aucune exécution)",
+            "Result (payload executed — banner added by the tool)" if dialog_fired
+            else "Result (after injection, no execution)",
         )
         if result_shot:
             screenshots.append(result_shot)
         vuln["screenshots"] = screenshots
         vuln["screenshot_b64"] = screenshots[-1]["image_b64"] if screenshots else ""
     except Exception as exc:
-        logger.debug("Vérification impossible pour %s : %s", test_url, exc)
-        vuln["verification_note"] = f"Vérification impossible : {exc}"
+        logger.debug("Verification failed for %s: %s", test_url, exc)
+        vuln["verification_note"] = f"Verification not possible: {exc}"
         vuln["screenshots"] = screenshots
     finally:
         await context.close()
         steps = _build_reproduction_steps(vuln, test_url)
         if vuln.get("verification_note"):
-            steps.append(f"Résultat observé : {vuln['verification_note']}")
+            steps.append(f"Observed result: {vuln['verification_note']}")
         vuln["reproduction_steps"] = steps
 
 

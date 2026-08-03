@@ -111,8 +111,8 @@ def _parse_dalfox(raw: str, target: str) -> list[Vulnerability]:
                 # `source`/`sink` : le paramètre reste provisoire ici (GET par
                 # défaut) — `parse_scan_results` le corrige en "POST" quand la
                 # découverte vient de run_dalfox_authenticated_post().
-                source=f"Paramètre '{parameter}' (GET)" if parameter else "Paramètre non identifié",
-                sink=sink_desc or "Sink non précisé par DalFox",
+                source=f"Parameter '{parameter}' (GET)" if parameter else "Parameter not identified",
+                sink=sink_desc or "Sink not specified by DalFox",
                 raw=e,
             )
         )
@@ -128,13 +128,13 @@ def _describe_inject_type(code: str) -> str:
         return ""
     low = code.lower()
     if low.startswith("injs"):
-        base = "Bloc JavaScript / gestionnaire d'évènement"
+        base = "JavaScript block / event handler"
     elif low.startswith("inhtml"):
-        base = "Corps HTML"
+        base = "HTML body"
     elif low.startswith("inattr"):
-        base = "Attribut HTML"
+        base = "HTML attribute"
     else:
-        base = "Contexte inconnu"
+        base = "Unknown context"
     return f"{base} ({code})"
 
 
@@ -188,16 +188,16 @@ def _parse_xsstrike(raw: str, target: str) -> list[Vulnerability]:
                 parameter=param,
                 payload=current.get("payload", ""),
                 context=(
-                    f"Paramètre de requête URL '{param}'"
-                    if param else "Paramètre de requête URL"
+                    f"URL query parameter '{param}'"
+                    if param else "URL query parameter"
                 ),
                 evidence=f"Efficiency={eff}%, Confidence={conf}/10",
                 confidence="high" if conf >= 8 else "medium" if conf >= 4 else "low",
                 source=(
-                    f"Paramètre d'URL '{param}' (GET)" if param
-                    else "Paramètre de requête URL (GET)"
+                    f"URL parameter '{param}' (GET)" if param
+                    else "URL query parameter (GET)"
                 ),
-                sink="Corps de la réponse HTTP (reflet HTML non échappé)",
+                sink="HTTP response body (unescaped HTML reflection)",
                 raw=dict(current),
             )
         )
@@ -294,15 +294,15 @@ def analyze_html_context(html_content: str, needle: str) -> str:
     try:
         soup = BeautifulSoup(html_content, "lxml")
     except Exception:
-        return "contexte indéterminé"
+        return "context undetermined"
 
     for tag in soup.find_all(True):
         if tag.string and needle in tag.string:
-            return f"réfléchi dans <{tag.name}> (contenu texte)"
+            return f"reflected in <{tag.name}> (text content)"
         for attr, val in tag.attrs.items():
             if isinstance(val, str) and needle in val:
-                return f"réfléchi dans l'attribut '{attr}' de <{tag.name}>"
-    return "réfléchi dans le HTML (contexte non identifié)"
+                return f"reflected in the '{attr}' attribute of <{tag.name}>"
+    return "reflected in the HTML (context not identified)"
 
 
 # --------------------------------------------------------------------------
@@ -345,7 +345,7 @@ def parse_scan_results(scan_results: list) -> list[dict[str, Any]]:
                 v.source_page = source_page
                 if method == "POST":
                     where = source_page or v.url
-                    v.source = f"Champ de formulaire '{v.parameter}' (POST, {where})"
+                    v.source = f"Form field '{v.parameter}' (POST, {where})"
             all_vulns.extend(new_vulns)
         except Exception as exc:  # robustesse : un parseur ne doit pas tout casser
             logger.error("Échec du parsing pour %s : %s", tool, exc)

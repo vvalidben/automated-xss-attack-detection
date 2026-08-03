@@ -232,34 +232,34 @@ def _solve_captcha(text: str) -> str | None:
 # Identification best-effort du sink DOM-XSS déclenché (voir _record_finding)
 # --------------------------------------------------------------------------
 _SINK_LABELS = {
-    r"\.innerHTML\s*=": "innerHTML (affectation directe)",
-    r"\.outerHTML\s*=": "outerHTML (affectation directe)",
+    r"\.innerHTML\s*=": "innerHTML (direct assignment)",
+    r"\.outerHTML\s*=": "outerHTML (direct assignment)",
     r"document\.write\s*\(": "document.write()",
     r"document\.writeln\s*\(": "document.writeln()",
     r"\.insertAdjacentHTML\s*\(": "insertAdjacentHTML()",
     r"eval\s*\(": "eval()",
-    r"setTimeout\s*\(\s*['\"]": "setTimeout() avec chaîne de code",
-    r"setInterval\s*\(\s*['\"]": "setInterval() avec chaîne de code",
+    r"setTimeout\s*\(\s*['\"]": "setTimeout() with a code string",
+    r"setInterval\s*\(\s*['\"]": "setInterval() with a code string",
     r"location\.hash": "location.hash",
     r"location\.search": "location.search",
     r"\$\(.*\)\.html\s*\(": "jQuery .html()",
 }
 
-# Sink par défaut selon le vecteur, quand aucun pattern de `DOM_SINK_PATTERNS`
-# n'est retrouvé littéralement dans le HTML rendu (fréquent avec Angular : le
-# framework compile ses liaisons `[innerHTML]`/interpolation en code qui ne
-# contient plus la chaîne "innerHTML" telle quelle). Reste honnête : on décrit
-# le mécanisme probable plutôt que d'inventer une preuve qu'on n'a pas.
+# Default sink per vector, used when no `DOM_SINK_PATTERNS` pattern is found
+# literally in the rendered HTML (common with Angular: the framework compiles
+# its `[innerHTML]`/interpolation bindings into code that no longer contains
+# the literal "innerHTML" string). Stays honest: describes the probable
+# mechanism rather than inventing evidence we don't have.
 _DEFAULT_SINK_BY_VECTOR = {
-    "DOM XSS": "Sink DOM implicite : liaison de template SPA (ex. Angular "
-               "[innerHTML] / interpolation) insérant la valeur du champ "
-               "dans le DOM rendu sans échappement.",
-    "Reflected XSS": "Sink DOM implicite : la route Angular consomme le "
-                      "paramètre d'URL et l'injecte dans le DOM rendu sans "
-                      "échappement au chargement de la page.",
-    "Persisted XSS": "Sink DOM implicite : la valeur relue depuis le "
-                      "serveur est réinjectée dans le DOM rendu sans "
-                      "échappement (template affichant la donnée stockée).",
+    "DOM XSS": "Implicit DOM sink: SPA template binding (e.g. Angular "
+               "[innerHTML] / interpolation) inserting the field value "
+               "into the rendered DOM without escaping.",
+    "Reflected XSS": "Implicit DOM sink: the Angular route consumes the "
+                      "URL parameter and injects it into the rendered DOM "
+                      "without escaping on page load.",
+    "Persisted XSS": "Implicit DOM sink: the value read back from the "
+                      "server is re-injected into the rendered DOM without "
+                      "escaping (template displaying the stored data).",
 }
 
 
@@ -279,7 +279,7 @@ async def _identify_sink(page: Page, vuln_type: str) -> str:
     for pattern, label in _SINK_LABELS.items():
         if re.search(pattern, content):
             return label
-    return _DEFAULT_SINK_BY_VECTOR.get(vuln_type, "Sink DOM non identifié précisément.")
+    return _DEFAULT_SINK_BY_VECTOR.get(vuln_type, "DOM sink not precisely identified.")
 
 
 # --------------------------------------------------------------------------
@@ -648,11 +648,10 @@ class PlaywrightCrawler:
                     if (document.getElementById(id)) return;
                     const b = document.createElement('div');
                     b.id = id;
-                    b.textContent = '✅ XSS CONFIRME — une boite de dialogue JS '
-                        + '(alert/confirm/prompt) vient de se declencher ici. Les dialogues '
-                        + 'natifs du navigateur ne peuvent pas apparaitre sur une capture '
-                        + 'd\\'ecran : ce bandeau, ajoute par l\\'outil apres coup, marque le '
-                        + 'moment de l\\'execution.';
+                    b.textContent = '✅ XSS CONFIRMED — a JS dialog '
+                        + '(alert/confirm/prompt) just fired here. Native browser dialogs '
+                        + 'cannot appear in a screenshot: this banner, added by the tool '
+                        + 'afterwards, marks the moment of execution.';
                     b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;'
                         + 'background:#c0392b;color:#fff;font:bold 13px/1.5 sans-serif;'
                         + 'padding:10px 18px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.5);';
@@ -690,7 +689,7 @@ class PlaywrightCrawler:
 
         screenshots = list(extra_shots or [])
         await self._annotate_confirmed(page)
-        result_shot = await self._snap(page, "Résultat (exécution confirmée — bandeau ajouté par l'outil)")
+        result_shot = await self._snap(page, "Result (confirmed execution — banner added by the tool)")
         if result_shot:
             screenshots.append(result_shot)
 
@@ -702,10 +701,10 @@ class PlaywrightCrawler:
             "url": base_url,
             "parameter": parameter,
             "payload": payload,
-            "context": "DOM — rendu côté client (SPA)",
-            "source": source or f"Champ/paramètre '{parameter}'",
+            "context": "DOM — client-side rendering (SPA)",
+            "source": source or f"Field/parameter '{parameter}'",
             "sink": sink,
-            "evidence": "Boîte de dialogue JS déclenchée dans un vrai navigateur",
+            "evidence": "JS dialog triggered in a real browser",
             "confidence": "high",
             "cwe": "CWE-79",
             "confirmed": True,
@@ -714,12 +713,12 @@ class PlaywrightCrawler:
             "verification_note": note,
             "reproduction_url": page.url if page.url else "",
             "reproduction_steps": [
-                f"Source : {source or f'champ/paramètre {parameter!r}'} — c'est "
-                "par là que la donnée attaquant-contrôlée entre dans l'application.",
-                f"Sink : {sink} — c'est là que cette donnée est utilisée de "
-                "façon dangereuse (insérée dans le DOM sans échappement).",
-                f"Payload : {payload}",
-                f"Résultat observé : {note}",
+                f"Source: {source or f'field/parameter {parameter!r}'} — this "
+                "is where attacker-controlled data enters the application.",
+                f"Sink: {sink} — this is where that data is used "
+                "dangerously (inserted into the DOM without escaping).",
+                f"Payload: {payload}",
+                f"Observed result: {note}",
             ],
         })
 
@@ -749,7 +748,7 @@ class PlaywrightCrawler:
         for inp in inputs[:2]:
             if self._dom_probe_budget <= 0:
                 break
-            before_shot = await self._snap(page, "Avant injection (champ vide)")
+            before_shot = await self._snap(page, "Before injection (empty field)")
             for payload in DOM_XSS_PAYLOADS:
                 if self._dom_probe_budget <= 0:
                     break
@@ -758,7 +757,7 @@ class PlaywrightCrawler:
                 try:
                     await inp.fill(payload)
                     injection_shot = await self._snap(
-                        page, "Payload saisi dans le champ (avant validation)"
+                        page, "Payload typed into the field (before submit)"
                     )
                     await inp.press("Enter")
                     await page.wait_for_timeout(1000)
@@ -768,11 +767,11 @@ class PlaywrightCrawler:
                 if self._dialog_fired:
                     shots = [s for s in (before_shot, injection_shot) if s]
                     await self._record_finding(
-                        page, base_url, payload, "champ de recherche / texte",
+                        page, base_url, payload, "search/text field",
                         "DOM XSS",
-                        "Payload injecté directement dans le champ de saisie et "
-                        "exécuté par le rendu JS de la page (alert() déclenché).",
-                        source="Champ de saisie utilisateur (recherche/texte, frappe directe)",
+                        "Payload injected directly into the input field and "
+                        "executed by the page's JS rendering (alert() fired).",
+                        source="User input field (search/text, direct typing)",
                         extra_shots=shots,
                     )
                     # On continue avec les payloads suivants (demande
@@ -812,7 +811,7 @@ class PlaywrightCrawler:
         # l'étiquette de `base_url` dans les étapes suivantes du crawl. On
         # restaure systématiquement la page d'origine avant de rendre la
         # main, succès ou non.
-        before_shot = await self._snap(page, "Avant injection (page d'origine)")
+        before_shot = await self._snap(page, "Before injection (original page)")
         try:
             # Tout le corpus (borné par le budget global, pas par un premier
             # succès) : demande explicite de tester large sur ce vecteur.
@@ -833,12 +832,12 @@ class PlaywrightCrawler:
 
                 if self._dialog_fired:
                     await self._record_finding(
-                        page, test_url, payload, "q (paramètre d'URL)",
+                        page, test_url, payload, "q (URL parameter)",
                         "Reflected XSS",
-                        "Payload placé directement dans le paramètre d'URL 'q' "
-                        "(sans passer par le champ de saisie) et exécuté par le "
-                        "rendu JS de la route Angular au chargement de la page.",
-                        source="Paramètre d'URL 'q' (GET, injecté sans passer par l'UI)",
+                        "Payload placed directly into the URL parameter 'q' "
+                        "(bypassing the input field) and executed by the "
+                        "Angular route's JS rendering on page load.",
+                        source="URL parameter 'q' (GET, injected without going through the UI)",
                         extra_shots=[before_shot] if before_shot else None,
                     )
         finally:
@@ -916,7 +915,7 @@ class PlaywrightCrawler:
             except Exception:
                 pass
 
-            before_shot = await self._snap(page, "Avant injection (formulaire vide)")
+            before_shot = await self._snap(page, "Before injection (empty form)")
 
             tested_any = False
             for field in fields[:3]:
@@ -940,7 +939,7 @@ class PlaywrightCrawler:
             if not tested_any:
                 continue
 
-            injection_shot = await self._snap(page, "Payload saisi dans le formulaire (avant soumission)")
+            injection_shot = await self._snap(page, "Payload typed into the form (before submit)")
             probe_shots = [s for s in (before_shot, injection_shot) if s]
 
             self._dialog_fired = False
@@ -963,19 +962,18 @@ class PlaywrightCrawler:
 
             if self._dialog_fired:
                 await self._record_finding(
-                    page, base_url, payload, "champ de formulaire (persisté)",
+                    page, base_url, payload, "form field (persisted)",
                     "Persisted XSS",
-                    "Payload soumis via un formulaire et exécuté immédiatement "
-                    "après enregistrement (rendu non échappé de la valeur).",
-                    source="Champ de formulaire soumis (POST, persisté côté serveur)",
+                    "Payload submitted via a form and executed immediately "
+                    "after saving (unescaped rendering of the value).",
+                    source="Form field submitted (POST, persisted server-side)",
                     extra_shots=probe_shots,
                 )
                 continue
 
-            # Le rendu non échappé peut n'apparaître qu'après relecture
-            # depuis le serveur (ex : nom d'utilisateur affiché ailleurs
-            # après reload).
-            after_submit_shot = await self._snap(page, "Après soumission (avant rechargement)")
+            # The unescaped rendering may only appear after reading it back
+            # from the server (e.g. username displayed elsewhere after reload).
+            after_submit_shot = await self._snap(page, "After submit (before reload)")
             try:
                 await self._goto_resilient(page, base_url)
                 self._dialog_fired = False
@@ -986,12 +984,12 @@ class PlaywrightCrawler:
             if self._dialog_fired:
                 shots = probe_shots + ([after_submit_shot] if after_submit_shot else [])
                 await self._record_finding(
-                    page, base_url, payload, "champ de formulaire (persisté)",
+                    page, base_url, payload, "form field (persisted)",
                     "Persisted XSS",
-                    "Payload soumis via un formulaire ; l'exécution ne s'est "
-                    "déclenchée qu'après rechargement de la page (valeur relue "
-                    "stockée côté serveur, rendue sans échappement).",
-                    source="Champ de formulaire soumis (POST, persisté côté serveur, relu au reload)",
+                    "Payload submitted via a form; execution only fired "
+                    "after the page was reloaded (value read back from the "
+                    "server, rendered without escaping).",
+                    source="Form field submitted (POST, persisted server-side, read back on reload)",
                     extra_shots=shots,
                 )
 

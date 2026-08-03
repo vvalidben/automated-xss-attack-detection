@@ -73,16 +73,16 @@ def build_context(
     risk_score = sum(weights[s] * c for s, c in confirmed_severity_stats.items())
 
     if confirmed_severity_stats["Critical"] or confirmed_severity_stats["High"]:
-        risk_level = "Élevé"
+        risk_level = "High"
     elif confirmed_severity_stats["Medium"]:
-        risk_level = "Modéré"
+        risk_level = "Moderate"
     elif confirmed:
-        risk_level = "Faible"
+        risk_level = "Low"
     elif vulnerabilities:
         # Rien de confirmé : uniquement des signaux heuristiques non vérifiés.
-        risk_level = "Non confirmé (faux positifs possibles)"
+        risk_level = "Unconfirmed (possible false positives)"
     else:
-        risk_level = "Aucun risque XSS détecté"
+        risk_level = "No XSS risk detected"
 
     return {
         "target": target,
@@ -114,7 +114,7 @@ def render_html(context: dict[str, Any], filename: str | None = None) -> Path:
     filename = filename or _timestamped("report", "html")
     out_path = config.REPORTS_DIR / filename
     out_path.write_text(html_out, encoding="utf-8")
-    logger.info("Rapport HTML généré : %s", out_path)
+    logger.info("HTML report generated: %s", out_path)
     return out_path
 
 
@@ -134,7 +134,7 @@ def _severity_pie(severity_stats: dict[str, int]) -> Drawing:
     # Si tout est à zéro, on met une part factice pour éviter une erreur.
     if sum(data) == 0:
         pie.data = [1]
-        pie.labels = ["Aucune"]
+        pie.labels = ["None"]
         pie.slices[0].fillColor = colors.HexColor("#4caf50")
     else:
         pie.data = data
@@ -169,7 +169,7 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
         str(out_path), pagesize=A4,
         topMargin=1.5 * cm, bottomMargin=1.5 * cm,
         leftMargin=1.8 * cm, rightMargin=1.8 * cm,
-        title="Rapport d'analyse XSS",
+        title="XSS Analysis Report",
     )
 
     styles = getSampleStyleSheet()
@@ -199,8 +199,8 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
 
     # ---- Page de garde / en-tête (bandeau coloré plein) ----
     banner = Table([
-        [Paragraph("🛡️ Rapport d'Analyse XSS Automatisée", styles["TitleBig"])],
-        [Paragraph("Plateforme DAST — XSStrike &amp; DalFox orchestrés par Docker", styles["Subtitle"])],
+        [Paragraph("🛡️ Automated XSS Analysis Report", styles["TitleBig"])],
+        [Paragraph("DAST Platform — XSStrike &amp; DalFox orchestrated via Docker", styles["Subtitle"])],
     ], colWidths=[17.4 * cm])
     banner.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1a237e")),
@@ -212,17 +212,17 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     story.append(Spacer(1, 0.5 * cm))
 
     risk_color = {
-        "Élevé": colors.HexColor("#8e0000"),
-        "Modéré": colors.HexColor("#c77700"),
-        "Non confirmé (faux positifs possibles)": colors.HexColor("#777777"),
+        "High": colors.HexColor("#8e0000"),
+        "Moderate": colors.HexColor("#c77700"),
+        "Unconfirmed (possible false positives)": colors.HexColor("#777777"),
     }.get(context["risk_level"], colors.HexColor("#00895c"))
 
     meta_tbl = Table([
-        ["Cible", context["target"]],
-        ["Date de génération", context["generated_at"]],
-        ["Niveau de risque", context["risk_level"]],
-        ["Score de risque", str(context["risk_score"])],
-        ["Vulnérabilités détectées", str(context["total_vulns"])],
+        ["Target", context["target"]],
+        ["Generated on", context["generated_at"]],
+        ["Risk level", context["risk_level"]],
+        ["Risk score", str(context["risk_score"])],
+        ["Vulnerabilities detected", str(context["total_vulns"])],
     ], colWidths=[5 * cm, 11 * cm])
     meta_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#e8eaf6")),
@@ -238,16 +238,16 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     story.append(Spacer(1, 0.5 * cm))
 
     # ---- Méthodologie ----
-    story.extend(section_header("🧭 Méthodologie — comment ces vulnérabilités ont été trouvées"))
+    story.extend(section_header("🧭 Methodology — how these vulnerabilities were found"))
     method_rows = [
-        ["1. Reconnaissance", "Le crawler Playwright rend le JavaScript de la cible, découvre "
-         "URLs/formulaires/appels API et repère les sinks DOM. Aucune injection à ce stade."],
-        ["2. Scan automatisé", "XSStrike et DalFox fuzzent chaque paramètre découvert dans des "
-         "conteneurs Docker jetables (URLs GET et formulaires POST authentifiés)."],
-        ["3. Normalisation", "Les sorties hétérogènes sont converties en un schéma unique "
-         "(payload, paramètre, contexte, sévérité) puis dédupliquées."],
-        ["4. Vérification réelle", "Chaque payload est rejoué dans un vrai navigateur en "
-         "reconstruisant l'URL exacte d'injection ; 'Confirmé' = dialogue JS réellement déclenché."],
+        ["1. Reconnaissance", "The Playwright crawler renders the target's JavaScript, "
+         "discovers URLs/forms/API calls, and spots DOM sinks. No injection at this stage."],
+        ["2. Automated scan", "XSStrike and DalFox fuzz each discovered parameter inside "
+         "disposable Docker containers (GET URLs and authenticated POST forms)."],
+        ["3. Normalization", "Heterogeneous outputs are converted into a single schema "
+         "(payload, parameter, context, severity), then deduplicated."],
+        ["4. Real verification", "Each payload is replayed in a real browser by "
+         "reconstructing the exact injection URL; 'Confirmed' = a JS dialog actually fired."],
     ]
     method_tbl = Table(
         [[Paragraph(f"<b>{_esc(a)}</b>", styles["Cell"]), Paragraph(_esc(b), styles["Cell"])]
@@ -263,7 +263,7 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     story.append(method_tbl)
 
     # ---- Graphiques ----
-    story.extend(section_header("📊 Répartition des vulnérabilités par sévérité"))
+    story.extend(section_header("📊 Vulnerability breakdown by severity"))
     charts = Table(
         [[_severity_pie(context["severity_stats"]),
           _severity_bar(context["severity_stats"])]],
@@ -273,7 +273,7 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     story.append(charts)
 
     # ---- Tableau récapitulatif des sévérités ----
-    sev_rows = [["Sévérité", "Nombre"]]
+    sev_rows = [["Severity", "Count"]]
     sev_rows += [[s, str(c)] for s, c in context["severity_stats"].items()]
     sev_tbl = Table(sev_rows, colWidths=[8 * cm, 8 * cm])
     sev_style = [
@@ -296,15 +296,15 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     sinks = context["crawl"].get("dom_sinks_list") or []
     if sinks:
         story.append(PageBreak())
-        story.extend(section_header("🎯 Sinks détectés (surface d'attaque)"))
+        story.extend(section_header("🎯 Detected sinks (attack surface)"))
         story.append(Paragraph(
-            "Emplacements du code où une donnée arrivant dans le DOM pourrait être "
-            "exécutée sans échappement, détectés/exploités ou non — c'est la moitié "
-            "\"sink\" de l'équation <b>source → sink</b>.",
+            "Places in the code where data reaching the DOM could be executed without "
+            "escaping, whether detected/exploited or not — this is the "
+            "\"sink\" half of the <b>source → sink</b> equation.",
             styles["Normal"],
         ))
         story.append(Spacer(1, 0.2 * cm))
-        sink_rows = [["Page", "Sink", "Extrait"]] + [
+        sink_rows = [["Page", "Sink", "Excerpt"]] + [
             [Paragraph(_esc(s.get("page", "")), styles["Cell"]),
              Paragraph(f"<font color='#8e0000'><b>{_esc(s.get('pattern', ''))}</b></font>", styles["Cell"]),
              Paragraph(_esc(s.get("snippet", ""))[:140], styles["Cell"])]
@@ -323,7 +323,7 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
         story.append(sink_tbl)
         if len(sinks) > 40:
             story.append(Paragraph(
-                f"<font size=8 color='#888'>… et {len(sinks) - 40} de plus (liste tronquée).</font>",
+                f"<font size=8 color='#888'>… and {len(sinks) - 40} more (list truncated).</font>",
                 styles["Normal"],
             ))
 
@@ -331,10 +331,10 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
     endpoints = context["crawl"].get("injectable_urls_list") or []
     if endpoints:
         story.append(PageBreak())
-        story.extend(section_header("🌐 Endpoints scannés par les DAST"))
+        story.extend(section_header("🌐 Endpoints scanned by the DAST tools"))
         story.append(Paragraph(
-            "URLs paramétrées effectivement transmises à XSStrike/DalFox "
-            "(liens, formulaires, appels API interceptés pendant le crawl).",
+            "Parameterized URLs actually passed to XSStrike/DalFox "
+            "(links, forms, API calls intercepted during the crawl).",
             styles["Normal"],
         ))
         story.append(Spacer(1, 0.2 * cm))
@@ -356,16 +356,16 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
 
     # ---- Détail des vulnérabilités ----
     story.append(PageBreak())
-    story.extend(section_header("🐞 Détail des vulnérabilités"))
+    story.extend(section_header("🐞 Vulnerability detail"))
 
     if not context["vulnerabilities"]:
         story.append(Paragraph(
-            "Aucune vulnérabilité XSS n'a été détectée lors de cette analyse.",
+            "No XSS vulnerability was detected during this analysis.",
             styles["Normal"],
         ))
     else:
-        header = ["#", "Sévérité", "Type", "Outil", "Endpoint", "Paramètre",
-                   "Source → Sink", "Conf.", "Payload / Preuve"]
+        header = ["#", "Severity", "Type", "Tool", "Endpoint", "Parameter",
+                   "Source → Sink", "Conf.", "Payload / Evidence"]
         rows = [header]
         for i, v in enumerate(context["vulnerabilities"], start=1):
             payload = (v.get("payload") or "")[:120]
@@ -375,8 +375,8 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
                 styles["Cell"],
             )
             confirmed_cell = Paragraph(
-                "<font color='#4caf50'><b>OUI</b></font>" if v.get("confirmed")
-                else "<font color='#999'>non</font>",
+                "<font color='#4caf50'><b>YES</b></font>" if v.get("confirmed")
+                else "<font color='#999'>no</font>",
                 styles["Cell"],
             )
             source = v.get("source") or ""
@@ -438,12 +438,12 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
 
         # ---- Preuves visuelles (capture d'écran par navigateur réel) ----
         story.append(PageBreak())
-        story.extend(section_header("📸 Preuves visuelles (navigateur réel)"))
+        story.extend(section_header("📸 Visual evidence (real browser)"))
         story.append(Paragraph(
-            "Chaque payload a été rejoué dans un vrai navigateur (Playwright). Une "
-            "vulnérabilité n'est marquée <b>confirmée</b> que si une boîte de dialogue "
-            "JS (alert/confirm/prompt) s'est réellement déclenchée — preuve d'exécution, "
-            "pas seulement un score heuristique du scanner.",
+            "Each payload was replayed in a real browser (Playwright). A "
+            "vulnerability is only marked <b>confirmed</b> if a JS dialog "
+            "(alert/confirm/prompt) actually fired — proof of execution, "
+            "not just a heuristic score from the scanner.",
             styles["Normal"],
         ))
         story.append(Spacer(1, 0.3 * cm))
@@ -452,15 +452,15 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
             story.append(Paragraph(
                 f"#{i} — {_esc(v.get('tool', ''))} — "
                 f"<font color='{'#4caf50' if v.get('confirmed') else '#999'}'>"
-                f"<b>{'Confirmé' if v.get('confirmed') else 'Non confirmé'}</b></font> — "
+                f"<b>{'Confirmed' if v.get('confirmed') else 'Not confirmed'}</b></font> — "
                 f"<font size=8>{_esc(v.get('url', '') or '-')}</font>",
                 styles["Normal"],
             ))
             if v.get("source") or v.get("sink"):
                 story.append(Paragraph(
-                    f"<font size=8 color='#0d47a1'>🔵 Source : {_esc(v.get('source') or '—')}</font>"
+                    f"<font size=8 color='#0d47a1'>🔵 Source: {_esc(v.get('source') or '—')}</font>"
                     "&nbsp;&nbsp;→&nbsp;&nbsp;"
-                    f"<font size=8 color='#8e0000'>🎯 Sink : {_esc(v.get('sink') or v.get('context') or '—')}</font>",
+                    f"<font size=8 color='#8e0000'>🎯 Sink: {_esc(v.get('sink') or v.get('context') or '—')}</font>",
                     styles["Normal"],
                 ))
             steps = v.get("reproduction_steps") or []
@@ -485,7 +485,7 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
                 ))
 
             shots = v.get("screenshots") or (
-                [{"label": "Résultat", "image_b64": v["screenshot_b64"]}]
+                [{"label": "Result", "image_b64": v["screenshot_b64"]}]
                 if v.get("screenshot_b64") else []
             )
             for j, shot in enumerate(shots, start=1):
@@ -512,14 +512,14 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
 
     story.append(Spacer(1, 0.8 * cm))
     story.append(Paragraph(
-        "<font size=7 color='#999'>Rapport généré automatiquement par XSS Automation "
-        "Framework. Usage strictement autorisé à des fins de test sur des cibles "
-        "dont vous possédez l'autorisation explicite.</font>",
+        "<font size=7 color='#999'>Automatically generated by XSS Automation "
+        "Framework. For authorized testing only, against targets you have "
+        "explicit permission to test.</font>",
         styles["Normal"],
     ))
 
     doc.build(story)
-    logger.info("Rapport PDF généré : %s", out_path)
+    logger.info("PDF report generated: %s", out_path)
     return out_path
 
 
