@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import threading
 from typing import Any
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -290,13 +291,20 @@ async def _verify_one(browser, vuln: dict[str, Any]) -> None:
         vuln["reproduction_steps"] = steps
 
 
-async def verify_vulnerabilities(vulnerabilities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def verify_vulnerabilities(
+    vulnerabilities: list[dict[str, Any]],
+    stop_event: threading.Event | None = None,
+) -> list[dict[str, Any]]:
     """
     Rejoue chaque vulnérabilité (URL + paramètre + payload) dans un vrai
     navigateur et enrichit chaque dict avec :
         - confirmed (bool) : un dialogue JS s'est réellement déclenché,
         - screenshot_b64 (str) : capture d'écran encodée en base64,
         - verification_note (str) : explication lisible du résultat.
+
+    `stop_event` (pause utilisateur) est vérifié entre chaque vulnérabilité :
+    celles déjà vérifiées restent enrichies, les suivantes sont laissées
+    telles quelles plutôt que de forcer la fin de la vérification en cours.
     """
     if not vulnerabilities:
         return vulnerabilities
@@ -305,6 +313,8 @@ async def verify_vulnerabilities(vulnerabilities: list[dict[str, Any]]) -> list[
         browser = await pw.chromium.launch(headless=config.CRAWLER_HEADLESS)
         try:
             for v in vulnerabilities:
+                if stop_event is not None and stop_event.is_set():
+                    break
                 await _verify_one(browser, v)
         finally:
             await browser.close()

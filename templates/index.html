@@ -100,18 +100,51 @@
 
     label { display:block; font-weight:600; margin:16px 0 6px; font-size:12px;
             letter-spacing:1.5px; text-transform:uppercase; color:var(--text-dim); }
-    input[type=text] {
+    input[type=text], input[type=password] {
       width:100%; padding:12px 14px; background:rgba(0,0,0,.35); color:var(--text);
       border:1px solid var(--neon-dim); border-radius:3px; font-size:15px;
       font-family:inherit; transition:.2s;
     }
-    input[type=text]:focus { outline:none; border-color:var(--neon); box-shadow:var(--glow); }
-    input[type=text]::placeholder { color:#3d6b5a; }
+    input[type=text]:focus, input[type=password]:focus { outline:none; border-color:var(--neon); box-shadow:var(--glow); }
+    input[type=text]::placeholder, input[type=password]::placeholder { color:#3d6b5a; }
 
     .checks { display:flex; gap:24px; margin:18px 0; }
     .checks label { display:flex; align-items:center; gap:8px; font-weight:500; margin:0;
                      text-transform:none; letter-spacing:0; font-size:14px; color:var(--text); }
     input[type=checkbox] { accent-color:var(--neon); width:16px; height:16px; }
+
+    .level-picker { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-top:6px; }
+    .level-btn {
+      width:auto; margin-top:0; padding:10px 6px; font-size:11px; letter-spacing:.5px;
+      font-weight:600; text-transform:none; background:rgba(0,0,0,.3);
+      border:1px solid var(--neon-dim); border-radius:3px; color:var(--text-dim);
+      cursor:pointer; font-family:inherit; display:flex; flex-direction:column;
+      align-items:center; gap:5px; transition:.2s;
+    }
+    .level-btn:hover { border-color:var(--neon-soft); color:var(--text); box-shadow:none; background:rgba(0,0,0,.3); }
+    .level-btn .level-num {
+      width:20px; height:20px; border-radius:50%; border:1px solid currentColor;
+      display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;
+    }
+    .level-btn .level-name { font-size:10px; letter-spacing:1px; text-transform:uppercase; }
+    .level-btn.active { border-color:var(--neon); color:var(--neon); box-shadow:var(--glow); background:rgba(57,255,148,.08); }
+    .level-desc { font-size:11.5px; color:var(--text-dim); margin-top:10px; line-height:1.5; min-height:32px; }
+
+    .auth-details {
+      margin-top:20px; border:1px solid var(--neon-dim); border-radius:3px;
+      background:rgba(0,0,0,.2);
+    }
+    .auth-details summary {
+      cursor:pointer; padding:12px 14px; font-size:12px; letter-spacing:.5px;
+      color:var(--text-dim); list-style:none; user-select:none;
+    }
+    .auth-details summary::-webkit-details-marker { display:none; }
+    .auth-details summary::before { content:'▸ '; color:var(--neon); }
+    .auth-details[open] summary::before { content:'▾ '; }
+    .auth-details[open] summary { border-bottom:1px solid var(--neon-dim); color:var(--text); }
+    .auth-body { padding:4px 14px 16px; }
+    .auth-note { font-size:11px; color:var(--text-dim); line-height:1.6; margin:6px 0 14px; }
+    .auth-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
 
     button {
       width:100%; margin-top:22px; padding:14px; background:transparent; color:var(--neon);
@@ -121,6 +154,12 @@
     }
     button:hover:not(:disabled) { background:rgba(57,255,148,.12); box-shadow:var(--glow); }
     button:disabled { opacity:.4; cursor:not-allowed; }
+
+    .pause-btn {
+      display:none; margin-top:14px; border-color:var(--warn); color:var(--warn);
+    }
+    .pause-btn.show { display:block; }
+    .pause-btn:hover:not(:disabled) { background:rgba(255,206,84,.12); box-shadow:0 0 10px rgba(255,206,84,.5); }
 
     /* ---- Zone de statut / chargement ---- */
     .status { margin-top:24px; display:none; }
@@ -175,6 +214,7 @@
     .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; }
     .pill-done { background:rgba(57,255,148,.15); color:var(--neon); border:1px solid var(--neon); }
     .pill-error { background:rgba(255,77,94,.15); color:var(--danger); border:1px solid var(--danger); }
+    .pill-paused { background:rgba(255,206,84,.15); color:var(--warn); border:1px solid var(--warn); }
     .hist-links a { color:var(--neon); text-decoration:none; margin-right:10px; font-size:12px; }
     .hist-links a:hover { text-decoration:underline; }
     .hist-empty { color:var(--text-dim); font-size:13px; text-align:center; padding:20px 0; }
@@ -213,6 +253,50 @@
           <label><input type="checkbox" id="use_dalfox" checked> DalFox</label>
         </div>
 
+        <label>Niveau de scan</label>
+        <div class="level-picker" id="levelPicker">
+          {% for n, lvl in scan_levels.items() %}
+          <button type="button" class="level-btn{% if n == default_scan_level %} active{% endif %}"
+                  data-level="{{ n }}" data-desc="{{ lvl.description }}">
+            <span class="level-num">{{ n }}</span>
+            <span class="level-name">{{ lvl.label }}</span>
+          </button>
+          {% endfor %}
+        </div>
+        <div class="level-desc" id="levelDesc">{{ scan_levels[default_scan_level].description }}</div>
+        <input type="hidden" id="level" value="{{ default_scan_level }}">
+
+        <details class="auth-details">
+          <summary>🔑 Authentication (optional) — use a real session instead of the auto-generated test account</summary>
+          <div class="auth-body">
+            <p class="auth-note">
+              Fill in EITHER a session cookie / JWT (grabbed from an already
+              logged-in browser) OR a username + password of an existing test
+              account. If left empty, the scanner auto-registers and logs in
+              with a disposable throwaway account, as before.
+            </p>
+
+            <label for="auth_cookie">Session cookie</label>
+            <input type="text" id="auth_cookie" name="auth_cookie"
+                   placeholder="connect.sid=s%3A...; other_cookie=value">
+
+            <label for="auth_jwt">JWT / Bearer token</label>
+            <input type="text" id="auth_jwt" name="auth_jwt"
+                   placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+
+            <div class="auth-grid">
+              <div>
+                <label for="auth_username">Username / email</label>
+                <input type="text" id="auth_username" name="auth_username" placeholder="user@example.com">
+              </div>
+              <div>
+                <label for="auth_password">Password</label>
+                <input type="password" id="auth_password" name="auth_password" placeholder="••••••••">
+              </div>
+            </div>
+          </div>
+        </details>
+
         <button type="submit" id="submitBtn">▶ Lancer l'analyse</button>
       </form>
 
@@ -227,6 +311,7 @@
         </ul>
         <div class="term" id="stepText">Initialisation…</div>
         <div id="warnBox"></div>
+        <button type="button" id="pauseBtn" class="pause-btn">⏸ Mettre en pause</button>
       </div>
 
       <div class="actions" id="actions">
@@ -257,8 +342,42 @@
     const actions = document.getElementById('actions');
     const warnBox = document.getElementById('warnBox');
     const stepsList = document.getElementById('steps');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const levelPicker = document.getElementById('levelPicker');
+    const levelInput = document.getElementById('level');
+    const levelDesc = document.getElementById('levelDesc');
     const STEP_ORDER = ['crawling', 'scanning', 'parsing', 'verifying', 'reporting'];
     let pollTimer = null;
+    let currentScanId = null;
+
+    levelPicker.addEventListener('click', (e) => {
+      const btn = e.target.closest('.level-btn');
+      if (!btn) return;
+      [...levelPicker.children].forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      levelInput.value = btn.dataset.level;
+      levelDesc.textContent = btn.dataset.desc;
+    });
+
+    pauseBtn.addEventListener('click', async () => {
+      if (!currentScanId) return;
+      pauseBtn.disabled = true;
+      pauseBtn.textContent = '⏸ Pause en cours…';
+      try {
+        const res = await fetch(`/scan/${currentScanId}/pause`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.ok === false) {
+          pauseBtn.disabled = false;
+          pauseBtn.textContent = '⏸ Mettre en pause';
+        }
+        // Si accepté, on attend simplement que le prochain poll() détecte
+        // status === 'paused' (le pipeline honore la pause dès son prochain
+        // point de contrôle, pas instantanément) et remette le bouton à zéro.
+      } catch (err) {
+        pauseBtn.disabled = false;
+        pauseBtn.textContent = '⏸ Mettre en pause';
+      }
+    });
 
     function tickClock() {
       document.getElementById('clock').textContent = new Date().toLocaleTimeString('fr-FR');
@@ -285,11 +404,19 @@
       stepText.classList.remove('err');
       stepText.textContent = 'Envoi de la requête…';
       updateSteps('crawling');
+      pauseBtn.disabled = false;
+      pauseBtn.textContent = '⏸ Mettre en pause';
+      pauseBtn.classList.add('show');
 
       const fd = new FormData();
       fd.append('target', document.getElementById('target').value);
       fd.append('use_xsstrike', document.getElementById('use_xsstrike').checked);
       fd.append('use_dalfox', document.getElementById('use_dalfox').checked);
+      fd.append('level', levelInput.value);
+      fd.append('auth_cookie', document.getElementById('auth_cookie').value);
+      fd.append('auth_jwt', document.getElementById('auth_jwt').value);
+      fd.append('auth_username', document.getElementById('auth_username').value);
+      fd.append('auth_password', document.getElementById('auth_password').value);
 
       try {
         const res = await fetch('/scan', { method:'POST', body: fd });
@@ -298,6 +425,7 @@
           throw new Error(err.detail || 'Erreur serveur');
         }
         const { scan_id } = await res.json();
+        currentScanId = scan_id;
         poll(scan_id);
       } catch (err) {
         showError(err.message);
@@ -315,6 +443,7 @@
 
           if (s.status === 'done') {
             clearInterval(pollTimer);
+            pauseBtn.classList.remove('show');
             [...stepsList.children].forEach(li => { li.classList.remove('active'); li.classList.add('done'); });
             stepText.textContent = `✓ Terminé — ${s.total_vulns} vulnérabilité(s) détectée(s).`;
             document.getElementById('viewLink').href = `/report/${scanId}`;
@@ -322,13 +451,26 @@
             actions.classList.add('show');
             submitBtn.disabled = false;
             loadHistory();
+          } else if (s.status === 'paused') {
+            clearInterval(pollTimer);
+            pauseBtn.classList.remove('show');
+            stepText.textContent = `${s.step} — ${s.total_vulns} vulnérabilité(s) trouvée(s) avant la pause.`;
+            if (s.has_report) {
+              document.getElementById('viewLink').href = `/report/${scanId}`;
+              document.getElementById('pdfLink').href = `/download/${scanId}`;
+              actions.classList.add('show');
+            }
+            submitBtn.disabled = false;
+            loadHistory();
           } else if (s.status === 'error') {
             clearInterval(pollTimer);
+            pauseBtn.classList.remove('show');
             showError(s.error || s.step);
             loadHistory();
           }
         } catch (err) {
           clearInterval(pollTimer);
+          pauseBtn.classList.remove('show');
           showError('Perte de connexion avec le serveur.');
         }
       }, 1500);
@@ -338,6 +480,7 @@
       stepText.textContent = '✗ ' + msg;
       stepText.classList.add('err');
       submitBtn.disabled = false;
+      pauseBtn.classList.remove('show');
     }
 
     function riskClass(level) {
@@ -359,15 +502,18 @@
         let rows = items.map(it => {
           const statusPill = it.status === 'done'
             ? '<span class="pill pill-done">terminé</span>'
+            : it.status === 'paused'
+            ? '<span class="pill pill-paused">en pause</span>'
             : '<span class="pill pill-error">erreur</span>';
-          const links = it.status === 'done'
+          const hasReport = (it.status === 'done' || it.status === 'paused') && it.html_file && it.pdf_file;
+          const links = hasReport
             ? `<span class="hist-links">
                  <a href="/files/${it.html_file}" target="_blank">Voir</a>
                  <a href="/files/${it.pdf_file}">PDF</a>
                </span>`
             : '<span class="hist-links">—</span>';
-          const risk = it.status === 'done'
-            ? `<span class="${riskClass(it.risk_level)}">${it.risk_level}</span>`
+          const risk = (it.status === 'done' || it.status === 'paused')
+            ? `<span class="${riskClass(it.risk_level)}">${it.risk_level || '—'}</span>`
             : '—';
           return `<tr>
             <td>${it.date || '—'}</td>

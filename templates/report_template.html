@@ -144,6 +144,9 @@
       {% if scan_meta and scan_meta.get('scanners') %}
       <span class="chip">🧰 {{ scan_meta.get('scanners') | join(' + ') }}</span>
       {% endif %}
+      {% if scan_meta and scan_meta.get('level') %}
+      <span class="chip">⚙️ Level: <b>{{ scan_meta.get('level') }}</b></span>
+      {% endif %}
     </div>
   </header>
 
@@ -337,6 +340,134 @@
       </table>
     </div>
     {% endif %}
+
+    <!-- Session & Cookie Security -->
+    <h2><span class="ico">🔐</span>Session &amp; cookie security</h2>
+    <div class="card">
+      {% set session = crawl.get('session_analysis', {}) %}
+      {% if session and session.get('logged_in') %}
+        <p class="muted">Not an XSS finding by itself — this audits what happens
+          <b>after</b> an XSS is confirmed: does the session mechanism let a
+          single injected payload steal a full authenticated session?</p>
+
+        {% if session.get('token_in_local_storage') %}
+        <p style="margin:14px 0;">
+          <span class="sev sev-High">HIGH IMPACT</span>
+          Session token stored in <code>localStorage</code> (JWT), not an HttpOnly
+          cookie — directly readable via <code>localStorage.getItem('token')</code>.
+          Any XSS confirmed above can exfiltrate it for a full session takeover.
+        </p>
+        {% endif %}
+
+        {% set cookies = session.get('cookies', []) %}
+        {% if cookies %}
+        <table>
+          <tr><th>Cookie</th><th>HttpOnly</th><th>Secure</th><th>SameSite</th><th>Session-only</th><th>Issues</th></tr>
+          {% for c in cookies %}
+          <tr>
+            <td><code>{{ c.name }}</code></td>
+            <td>{% if c.http_only %}<span class="sev badge-ok">yes</span>{% else %}<span class="sev sev-High">no</span>{% endif %}</td>
+            <td>{% if c.secure %}<span class="sev badge-ok">yes</span>{% else %}<span class="sev sev-Medium">no</span>{% endif %}</td>
+            <td>{{ c.same_site }}</td>
+            <td>{{ 'yes' if c.session_cookie else 'no' }}</td>
+            <td style="font-size:11.5px;">
+              {% if c.issues %}
+              <ul style="margin:0; padding-left:16px;">
+                {% for issue in c.issues %}<li>{{ issue }}</li>{% endfor %}
+              </ul>
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </table>
+        {% else %}
+        <p class="muted">No cookies were set by the target during the authenticated
+          session — consistent with a token-only / localStorage auth scheme.</p>
+        {% endif %}
+      {% elif session and session.get('note') %}
+        <p class="muted"><b>⚠ Authentication failed:</b> {{ session.get('note') }}</p>
+        {% set dbg = session.get('debug', {}) %}
+        {% if dbg %}
+        <div style="margin-top:14px; padding-top:14px; border-top:1px dashed #e0e0e0;">
+          <p class="muted" style="font-weight:600; margin-bottom:8px;">
+            Diagnostic — what the browser actually saw (use this to see
+            exactly why verification didn't confirm success):</p>
+          <table style="margin-bottom:10px;">
+            <tr><td style="width:170px;"><b>Final URL</b></td><td><code>{{ dbg.get('final_url', '—') }}</code></td></tr>
+            <tr><td><b>Cookies present</b></td><td>{{ dbg.get('cookies_present', []) | join(', ') or '—' }}</td></tr>
+            <tr><td><b>localStorage keys</b></td><td>{{ dbg.get('local_storage_keys', []) | join(', ') or '—' }}</td></tr>
+          </table>
+          {% set netlog = dbg.get('network_log', []) %}
+          {% if netlog %}
+          <p class="muted" style="font-weight:600; margin:10px 0 6px;">Network calls observed after applying the session:</p>
+          <ul style="margin:0 0 10px; padding-left:18px; font-size:11.5px;">
+            {% for line in netlog %}<li><code>{{ line }}</code></li>{% endfor %}
+          </ul>
+          {% else %}
+          <p class="muted">No XHR/fetch calls were observed — this site may validate
+            sessions server-side on the main page load rather than via a separate API
+            call, or may not call anything that looks like a user/account endpoint.</p>
+          {% endif %}
+          {% if dbg.get('screenshot') and dbg['screenshot'].get('image_b64') %}
+          <figure class="shot" style="max-width:420px;">
+            <img src="data:image/png;base64,{{ dbg['screenshot']['image_b64'] }}" alt="Page state after login attempt">
+            <figcaption>{{ dbg['screenshot'].get('label', 'Page state after the login attempt') }}</figcaption>
+          </figure>
+          {% endif %}
+        </div>
+        {% endif %}
+      {% else %}
+        <p class="muted">No authenticated session was established during this scan
+          (the target may not expose a recognizable login form, or the disposable
+          test account could not sign in) — session/cookie security could not be
+          audited.</p>
+      {% endif %}
+    </div>
+
+    <!-- Security headers & CSP -->
+    <h2><span class="ico">🛡️</span>Security headers &amp; CSP</h2>
+    <div class="card">
+      {% set sec_headers = crawl.get('security_headers', {}) %}
+      {% if sec_headers %}
+        <p class="muted">Not an XSS finding by itself — these headers determine
+          whether the <b>browser</b> has a safety net (Content-Security-Policy
+          in particular) even when a payload above successfully executes.</p>
+
+        <p style="margin:10px 0;">
+          {% if sec_headers.get('csp_enforced') %}
+          <span class="sev badge-ok">CSP present &amp; enforced</span>
+          {% elif sec_headers.get('csp_present') %}
+          <span class="sev sev-Medium">CSP present (report-only — not enforced)</span>
+          {% else %}
+          <span class="sev sev-High">No Content-Security-Policy</span>
+          {% endif %}
+        </p>
+
+        {% set hdr_findings = sec_headers.get('findings', []) %}
+        {% if hdr_findings %}
+        <table>
+          <tr><th>Header</th><th>Severity</th><th>Issue</th></tr>
+          {% for f in hdr_findings %}
+          <tr>
+            <td>{{ f.header }}</td>
+            <td><span class="sev sev-{{ f.severity }}">{{ f.severity }}</span></td>
+            <td style="font-size:11.5px;">{{ f.issue }}</td>
+          </tr>
+          {% endfor %}
+        </table>
+        {% else %}
+        <p class="muted">No issues found in the checked security headers.</p>
+        {% endif %}
+
+        {% if sec_headers.get('raw_csp') %}
+        <p class="muted" style="margin-top:12px;">Raw policy:</p>
+        <code style="display:block; white-space:pre-wrap; word-break:break-all;">{{ sec_headers.get('raw_csp') }}</code>
+        {% endif %}
+      {% else %}
+        <p class="muted">Security headers were not checked during this scan
+          (the crawl ended before the first page finished loading).</p>
+      {% endif %}
+    </div>
 
     <!-- Vulnerability detail -->
     <h2><span class="ico">🐞</span>Vulnerability detail</h2>

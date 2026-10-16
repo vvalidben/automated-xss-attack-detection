@@ -12,3 +12,5 @@ app_server.log
 .scratch_tmp/
 .claude/
 .env
+
+_report_work2/

@@ -78,3 +78,67 @@ SEVERITY_COLORS = {
     "Low": "#5bc0de",
     "Info": "#777777",
 }
+
+
+# --------------------------------------------------------------------------
+# Niveaux de scan (choisis par l'utilisateur dans l'UI)
+# --------------------------------------------------------------------------
+# Chaque niveau règle simultanément : la portée du crawl (pages/profondeur),
+# le budget de sondage actif du crawler (DOM-XSS / réfléchi / persisté —
+# voir core.crawler), le nombre d'endpoints réellement passés aux scanners
+# DAST (core.scanner_manager), si les formulaires POST authentifiés sont
+# fuzzés, si le corpus DalFox étendu (PortSwigger + PayloadBox) est chargé,
+# et un plafond de vérification navigateur (l'étape la plus coûteuse du
+# pipeline : un aller-retour Playwright complet par vulnérabilité).
+#
+# "Full scan" (niveau 4) reproduit le comportement historique par défaut du
+# framework (avant l'introduction des niveaux) ; les niveaux inférieurs
+# réduisent progressivement chaque axe pour un scan plus rapide/plus léger.
+SCAN_LEVELS: dict[int, dict] = {
+    1: {
+        "label": "Low",
+        "description": (
+            "Quick smoke test: a handful of pages, no persisted-form "
+            "fuzzing, no authenticated scan."
+        ),
+        "max_pages": 5, "max_depth": 1,
+        "dom_probe_budget": 10, "reflected_probe_budget": 5, "form_probe_budget": 0,
+        "header_probe_budget": 0,
+        "max_urls": 5, "max_auth_forms": 0,
+        "dalfox_remote_payloads": False, "verify_max": 10,
+    },
+    2: {
+        "label": "Normal",
+        "description": "Balanced default: moderate crawl depth and payload coverage.",
+        "max_pages": 15, "max_depth": 2,
+        "dom_probe_budget": 30, "reflected_probe_budget": 15, "form_probe_budget": 10,
+        "header_probe_budget": 4,
+        "max_urls": 10, "max_auth_forms": 1,
+        "dalfox_remote_payloads": False, "verify_max": 25,
+    },
+    3: {
+        "label": "Hard",
+        "description": (
+            "Thorough: wider crawl, larger payload budget, authenticated "
+            "form fuzzing, expanded DalFox corpus."
+        ),
+        "max_pages": 25, "max_depth": 2,
+        "dom_probe_budget": 45, "reflected_probe_budget": 25, "form_probe_budget": 20,
+        "header_probe_budget": 8,
+        "max_urls": 18, "max_auth_forms": 2,
+        "dalfox_remote_payloads": True, "verify_max": 50,
+    },
+    4: {
+        "label": "Full scan",
+        "description": (
+            "Maximum coverage: full crawl budget, every candidate "
+            "endpoint, no verification cap."
+        ),
+        "max_pages": 40, "max_depth": 2,
+        "dom_probe_budget": 60, "reflected_probe_budget": 30, "form_probe_budget": 30,
+        "header_probe_budget": 12,
+        "max_urls": 20, "max_auth_forms": 2,
+        "dalfox_remote_payloads": True, "verify_max": None,
+    },
+}
+DEFAULT_SCAN_LEVEL: int = 2

@@ -26,6 +26,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -95,7 +96,8 @@ class ScannerManager:
         return urlunparse(parsed._replace(netloc=host))
 
     def _run_container(
-        self, image: str, command: list[str], tool: str, target: str
+        self, image: str, command: list[str], tool: str, target: str,
+        stop_event: threading.Event | None = None,
     ) -> ScanResult:
         """
         Lance un conteneur, attend sa fin (avec timeout) et récupère les logs.
@@ -127,19 +129,46 @@ class ScannerManager:
             logger.info("[%s] docker run %s %s", tool, image, " ".join(command))
             container = self.client.containers.run(**run_kwargs)
 
-            # Attente avec timeout géré par le SDK.
-            try:
-                exit_status = container.wait(timeout=config.SCANNER_TIMEOUT_S)
-                result.exit_code = exit_status.get("StatusCode")
-            except Exception:
-                # Timeout : on tue le conteneur.
-                result.timed_out = True
-                logger.warning("[%s] Timeout (%ss) — arrêt du conteneur",
-                               tool, config.SCANNER_TIMEOUT_S)
+            # Attente par sondage (1s) plutôt qu'un unique `container.wait()`
+            # bloquant : ça permet de vérifier `stop_event` en cours de route
+            # et de tuer le conteneur immédiatement si l'utilisateur clique
+            # sur "Pause", au lieu d'attendre jusqu'à SCANNER_TIMEOUT_S.
+            deadline = time.monotonic() + config.SCANNER_TIMEOUT_S
+            paused = False
+            while True:
                 try:
-                    container.kill()
+                    container.reload()
+                    if container.status in ("exited", "dead"):
+                        result.exit_code = (
+                            container.attrs.get("State", {}).get("ExitCode")
+                        )
+                        break
                 except Exception:
-                    pass
+                    break  # conteneur déjà supprimé/inaccessible : on sort
+
+                if stop_event is not None and stop_event.is_set():
+                    paused = True
+                    logger.info("[%s] Pause demandée — arrêt du conteneur", tool)
+                    try:
+                        container.kill()
+                    except Exception:
+                        pass
+                    break
+
+                if time.monotonic() > deadline:
+                    result.timed_out = True
+                    logger.warning("[%s] Timeout (%ss) — arrêt du conteneur",
+                                   tool, config.SCANNER_TIMEOUT_S)
+                    try:
+                        container.kill()
+                    except Exception:
+                        pass
+                    break
+
+                time.sleep(1)
+
+            if paused:
+                result.error = "Analyse interrompue par l'utilisateur (pause)"
 
             # Récupération des logs (stdout+stderr séparés).
             try:
@@ -175,7 +204,7 @@ class ScannerManager:
         return result
 
     # ---- Scanners individuels -----------------------------------------
-    def run_xsstrike(self, url: str) -> ScanResult:
+    def run_xsstrike(self, url: str, stop_event: threading.Event | None = None) -> ScanResult:
         """
         XSStrike : analyse contextuelle + génération de payloads.
         L'entrypoint de l'image pointe déjà sur xsstrike.py.
@@ -184,35 +213,39 @@ class ScannerManager:
         """
         target = self._rewrite_host(url)
         cmd = ["-u", target, "--skip", "--timeout", "10"]
-        res = self._run_container(config.XSSTRIKE_IMAGE, cmd, "xsstrike", target)
+        res = self._run_container(config.XSSTRIKE_IMAGE, cmd, "xsstrike", target, stop_event)
         res.findings_format = "text"
         return res
 
-    def run_dalfox(self, url: str) -> ScanResult:
+    def run_dalfox(
+        self, url: str, stop_event: threading.Event | None = None,
+        remote_payloads: bool = True,
+    ) -> ScanResult:
         """
         DalFox : scanner XSS rapide. `--format json` donne une sortie
         structurée, idéale pour le parsing.
         `url` = mode analyse d'une URL unique avec ses paramètres.
 
-        `--remote-payloads portswigger,payloadbox` : corpus communautaire
-        élargi en plus des payloads intégrés de DalFox — demande explicite
-        de tester un large éventail de payloads sur chaque endpoint, pas
-        seulement le jeu par défaut. Appliqué à TOUS les scans GET (pas
-        seulement au POST authentifié comme avant), au prix d'un scan un
-        peu plus long par endpoint (~+30-40s, resté sous SCANNER_TIMEOUT_S).
+        `remote_payloads` (réglé par le niveau de scan, voir
+        config.SCAN_LEVELS) ajoute `--remote-payloads portswigger,payloadbox`
+        : corpus communautaire élargi en plus des payloads intégrés de
+        DalFox, au prix d'un scan plus long par endpoint (~+30-40s, resté
+        sous SCANNER_TIMEOUT_S) — désactivé sur les niveaux légers (Low/
+        Normal) pour rester rapide.
         """
         target = self._rewrite_host(url)
-        cmd = [
-            "url", target, "--format", "json", "--silence", "--no-color", "--skip-bav",
-            "--remote-payloads", "portswigger,payloadbox",
-        ]
-        res = self._run_container(config.DALFOX_IMAGE, cmd, "dalfox", target)
+        cmd = ["url", target, "--format", "json", "--silence", "--no-color", "--skip-bav"]
+        if remote_payloads:
+            cmd += ["--remote-payloads", "portswigger,payloadbox"]
+        res = self._run_container(config.DALFOX_IMAGE, cmd, "dalfox", target, stop_event)
         res.findings_format = "json"
         return res
 
     def run_dalfox_authenticated_post(
         self, url: str, post_data: str, auth_token: str,
         cookie_name: str = "token", source_page: str = "",
+        stop_event: threading.Event | None = None,
+        remote_payloads: bool = True,
     ) -> ScanResult:
         """
         DalFox en mode POST authentifié, pour les formulaires qui exigent une
@@ -233,17 +266,16 @@ class ScannerManager:
             "url", target,
             "-X", "POST", "-d", post_data,
             "-C", f"{cookie_name}={auth_token}",
+            "--format", "json", "--silence", "--no-color", "--skip-bav",
+        ]
+        if remote_payloads:
             # Corpus communautaire (PortSwigger + PayloadBox) en plus des
             # payloads intégrés de DalFox : ce champ est protégé par un
             # assainisseur serveur, donc plus le corpus est large, plus la
             # confiance dans un résultat négatif est forte (~5x plus de
-            # payloads testés, ~+35s, seulement sur ce test authentifié
-            # borné — pas sur les scans GET où l'absence de point de
-            # réflexion rend un corpus plus large inutile).
-            "--remote-payloads", "portswigger,payloadbox",
-            "--format", "json", "--silence", "--no-color", "--skip-bav",
-        ]
-        res = self._run_container(config.DALFOX_IMAGE, cmd, "dalfox", target)
+            # payloads testés, ~+35s) — réglé par le niveau de scan.
+            cmd += ["--remote-payloads", "portswigger,payloadbox"]
+        res = self._run_container(config.DALFOX_IMAGE, cmd, "dalfox", target, stop_event)
         res.findings_format = "json"
         res.method = "POST"
         res.source_page = source_page
@@ -256,6 +288,8 @@ class ScannerManager:
         use_xsstrike: bool = True,
         use_dalfox: bool = True,
         max_urls: int = 15,
+        stop_event: threading.Event | None = None,
+        dalfox_remote_payloads: bool = True,
     ) -> list[ScanResult]:
         """
         Scanne une liste d'URLs avec les scanners activés.
@@ -290,8 +324,16 @@ class ScannerManager:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {}
             for tool, url in jobs:
-                runner = self.run_xsstrike if tool == "xsstrike" else self.run_dalfox
-                futures[pool.submit(runner, url)] = (tool, url)
+                # Pause demandée : on arrête de SOUMETTRE de nouveaux jobs.
+                # Ceux déjà en vol se terminent (ou sont tués via stop_event,
+                # voir _run_container) au lieu d'être abandonnés à moitié.
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if tool == "xsstrike":
+                    fut = pool.submit(self.run_xsstrike, url, stop_event)
+                else:
+                    fut = pool.submit(self.run_dalfox, url, stop_event, dalfox_remote_payloads)
+                futures[fut] = (tool, url)
 
             for fut in concurrent.futures.as_completed(futures):
                 tool, url = futures[fut]

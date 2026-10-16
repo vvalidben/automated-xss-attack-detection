@@ -217,13 +217,17 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
         "Unconfirmed (possible false positives)": colors.HexColor("#777777"),
     }.get(context["risk_level"], colors.HexColor("#00895c"))
 
-    meta_tbl = Table([
+    meta_rows = [
         ["Target", context["target"]],
         ["Generated on", context["generated_at"]],
         ["Risk level", context["risk_level"]],
         ["Risk score", str(context["risk_score"])],
         ["Vulnerabilities detected", str(context["total_vulns"])],
-    ], colWidths=[5 * cm, 11 * cm])
+    ]
+    scan_level = (context.get("scan_meta") or {}).get("level")
+    if scan_level:
+        meta_rows.append(["Scan level", scan_level])
+    meta_tbl = Table(meta_rows, colWidths=[5 * cm, 11 * cm])
     meta_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#e8eaf6")),
         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
@@ -353,6 +357,208 @@ def render_pdf(context: dict[str, Any], filename: str | None = None) -> Path:
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
         ]))
         story.append(ep_tbl)
+
+    # ---- Sécurité de la session / des cookies ----
+    session = context["crawl"].get("session_analysis") or {}
+    story.append(PageBreak())
+    story.extend(section_header("🔐 Session &amp; cookie security"))
+    if session and session.get("logged_in"):
+        story.append(Paragraph(
+            "Not an XSS finding by itself — this audits what happens "
+            "<b>after</b> an XSS is confirmed: does the session mechanism let "
+            "a single injected payload steal a full authenticated session?",
+            styles["Normal"],
+        ))
+        if session.get("token_in_local_storage"):
+            story.append(Spacer(1, 0.15 * cm))
+            story.append(Paragraph(
+                "<font color='#8e0000'><b>HIGH IMPACT</b></font> — Session "
+                "token stored in <b>localStorage</b> (JWT), not an HttpOnly "
+                "cookie: directly readable via "
+                "<b>localStorage.getItem('token')</b>. Any XSS confirmed "
+                "above can exfiltrate it for a full session takeover.",
+                styles["Normal"],
+            ))
+        cookies = session.get("cookies") or []
+        if cookies:
+            story.append(Spacer(1, 0.25 * cm))
+            cookie_rows = [["Cookie", "HttpOnly", "Secure", "SameSite", "Issues"]]
+            for c in cookies:
+                issues_txt = "; ".join(c.get("issues") or []) or "—"
+                cookie_rows.append([
+                    Paragraph(_esc(c.get("name", "")), styles["Cell"]),
+                    "yes" if c.get("http_only") else "NO",
+                    "yes" if c.get("secure") else "no",
+                    _esc(c.get("same_site", "")),
+                    Paragraph(_esc(issues_txt), styles["Cell"]),
+                ])
+            cookie_tbl = Table(
+                cookie_rows, colWidths=[3 * cm, 1.8 * cm, 1.6 * cm, 2 * cm, 8.6 * cm],
+                repeatRows=1,
+            )
+            cstyle = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
+            ]
+            for i, c in enumerate(cookies, start=1):
+                if not c.get("http_only"):
+                    cstyle.append(("TEXTCOLOR", (1, i), (1, i), colors.HexColor("#8e0000")))
+                    cstyle.append(("FONTNAME", (1, i), (1, i), "Helvetica-Bold"))
+            cookie_tbl.setStyle(TableStyle(cstyle))
+            story.append(cookie_tbl)
+        else:
+            story.append(Spacer(1, 0.15 * cm))
+            story.append(Paragraph(
+                "No cookies were set by the target during the authenticated "
+                "session — consistent with a token-only / localStorage auth scheme.",
+                styles["Normal"],
+            ))
+    elif session and session.get("note"):
+        story.append(Paragraph(
+            f"<font color='#c77700'><b>⚠ Authentication failed:</b></font> "
+            f"{_esc(session['note'])}",
+            styles["Normal"],
+        ))
+        dbg = session.get("debug") or {}
+        if dbg:
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(Paragraph(
+                "<b>Diagnostic — what the browser actually saw:</b>",
+                styles["Normal"],
+            ))
+            story.append(Spacer(1, 0.1 * cm))
+            dbg_rows = [
+                ["Final URL", dbg.get("final_url", "—")],
+                ["Cookies present", ", ".join(dbg.get("cookies_present") or []) or "—"],
+                ["localStorage keys", ", ".join(dbg.get("local_storage_keys") or []) or "—"],
+            ]
+            dbg_tbl = Table(
+                [[Paragraph(_esc(a), styles["Cell"]), Paragraph(_esc(b), styles["Cell"])]
+                 for a, b in dbg_rows],
+                colWidths=[4 * cm, 13.4 * cm],
+            )
+            dbg_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#e8eaf6")),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(dbg_tbl)
+
+            netlog = dbg.get("network_log") or []
+            if netlog:
+                story.append(Spacer(1, 0.2 * cm))
+                story.append(Paragraph(
+                    "<font size=8.5><b>Network calls observed:</b></font>",
+                    styles["Normal"],
+                ))
+                for line in netlog:
+                    story.append(Paragraph(f"<font size=8>{_esc(line)}</font>", styles["Cell"]))
+            else:
+                story.append(Spacer(1, 0.15 * cm))
+                story.append(Paragraph(
+                    "<font size=8.5 color='#888'>No XHR/fetch calls were observed — this "
+                    "site may validate sessions server-side on the main page load rather "
+                    "than via a separate API call.</font>",
+                    styles["Normal"],
+                ))
+
+            shot = dbg.get("screenshot")
+            if shot and shot.get("image_b64"):
+                try:
+                    img_bytes = base64.b64decode(shot["image_b64"])
+                    img = Image(io.BytesIO(img_bytes))
+                    max_w = 9 * cm
+                    if img.imageWidth > 0:
+                        scale = min(1.0, max_w / img.imageWidth)
+                        img.drawWidth = img.imageWidth * scale
+                        img.drawHeight = img.imageHeight * scale
+                    story.append(Spacer(1, 0.2 * cm))
+                    story.append(img)
+                except Exception as exc:
+                    logger.debug("Capture de diagnostic illisible : %s", exc)
+    else:
+        story.append(Paragraph(
+            "No authenticated session was established during this scan (the "
+            "target may not expose a recognizable login form, or the "
+            "disposable test account could not sign in) — session/cookie "
+            "security could not be audited.",
+            styles["Normal"],
+        ))
+
+    # ---- En-têtes de sécurité HTTP & CSP ----
+    sec_headers = context["crawl"].get("security_headers") or {}
+    story.append(PageBreak())
+    story.extend(section_header("🛡️ Security headers &amp; CSP"))
+    if sec_headers:
+        story.append(Paragraph(
+            "Not an XSS finding by itself — these headers determine whether "
+            "the <b>browser</b> has a safety net (Content-Security-Policy in "
+            "particular) even when a payload above successfully executes.",
+            styles["Normal"],
+        ))
+        if sec_headers.get("csp_enforced"):
+            badge = "<font color='#00895c'><b>CSP present &amp; enforced</b></font>"
+        elif sec_headers.get("csp_present"):
+            badge = "<font color='#c77700'><b>CSP present (report-only — not enforced)</b></font>"
+        else:
+            badge = "<font color='#8e0000'><b>No Content-Security-Policy</b></font>"
+        story.append(Spacer(1, 0.15 * cm))
+        story.append(Paragraph(badge, styles["Normal"]))
+
+        hdr_findings = sec_headers.get("findings") or []
+        if hdr_findings:
+            story.append(Spacer(1, 0.25 * cm))
+            hdr_rows = [["Header", "Severity", "Issue"]]
+            for f in hdr_findings:
+                hdr_rows.append([
+                    Paragraph(_esc(f.get("header", "")), styles["Cell"]),
+                    f.get("severity", ""),
+                    Paragraph(_esc(f.get("issue", "")), styles["Cell"]),
+                ])
+            hdr_tbl = Table(hdr_rows, colWidths=[3.5 * cm, 2 * cm, 11.9 * cm], repeatRows=1)
+            hstyle = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
+            ]
+            for i, f in enumerate(hdr_findings, start=1):
+                sev = f.get("severity", "Medium")
+                hstyle.append(
+                    ("TEXTCOLOR", (1, i), (1, i), colors.HexColor(config.SEVERITY_COLORS.get(sev, "#777")))
+                )
+                hstyle.append(("FONTNAME", (1, i), (1, i), "Helvetica-Bold"))
+            hdr_tbl.setStyle(TableStyle(hstyle))
+            story.append(hdr_tbl)
+        else:
+            story.append(Spacer(1, 0.15 * cm))
+            story.append(Paragraph(
+                "No issues found in the checked security headers.",
+                styles["Normal"],
+            ))
+
+        if sec_headers.get("raw_csp"):
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(Paragraph(
+                f"<font size=7.5 color='#444'>{_esc(sec_headers['raw_csp'])}</font>",
+                styles["Cell"],
+            ))
+    else:
+        story.append(Paragraph(
+            "Security headers were not checked during this scan (the crawl "
+            "ended before the first page finished loading).",
+            styles["Normal"],
+        ))
 
     # ---- Détail des vulnérabilités ----
     story.append(PageBreak())

