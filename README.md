@@ -45,19 +45,49 @@ rapports **HTML interactifs** et **PDF professionnels**.
 1. **Interface (FastAPI)** — l'utilisateur saisit l'URL cible et choisit les
    scanners. Le scan tourne en tâche de fond ; l'UI interroge `/status` en
    polling et propose ensuite le rapport HTML et le PDF.
-2. **Crawler (Playwright)** — rend réellement le JavaScript (essentiel pour les
-   SPA comme Juice Shop), découvre les URLs internes, extrait les formulaires
-   (points d'injection) et repère les *sinks* DOM-XSS (`innerHTML`,
-   `document.write`, `eval`…). Il n'injecte rien : il cartographie la surface.
+2. **Crawler (Playwright)** — rend le JavaScript, découvre les URLs et les
+   formulaires, inventorie les sinks DOM et réalise des sondages actifs selon
+   le niveau choisi. Les observations de surface et les exécutions XSS
+   confirmées doivent rester distinctes.
 3. **Scanner Manager (SDK Docker)** — pour chaque URL candidate, lance XSStrike
    et DalFox dans des conteneurs jetables, en parallèle, avec timeouts stricts
    et nettoyage systématique.
 4. **Parser (LXML / BeautifulSoup)** — convertit les sorties hétérogènes (texte
    XSStrike, JSON DalFox) en un schéma unique `Vulnerability`, déduplique et
    attribue une sévérité.
-5. **Reporter (Jinja2 + ReportLab)** — produit un rapport HTML interactif et un
+5. **Vérification (Playwright)** — rejoue les candidats des scanners dans un
+   navigateur et recherche le déclenchement d'un dialogue JavaScript. Le budget
+   dépend du niveau de scan : les candidats hors budget restent non vérifiés.
+6. **Reporter (Jinja2 + ReportLab)** — produit un rapport HTML interactif et un
    PDF avec métriques, graphes d'impact (camembert + histogramme) et détail des
    vulnérabilités.
+
+### Diagramme du pipeline actuel
+
+```mermaid
+flowchart TD
+    UI["FastAPI : cible, scanners et niveau"] --> Queue["File d'attente : un pipeline à la fois"]
+    Queue --> Crawl["Playwright : découverte et sondages actifs"]
+    Crawl --> Scan["Docker : XSStrike et DalFox"]
+    Scan --> Parse["Parsing et normalisation"]
+    Parse --> Verify["Playwright : vérification, selon le budget"]
+    Crawl --> DOM["Observations DOM et résultats confirmés"]
+    Verify --> Report["Rapports HTML et PDF"]
+    DOM --> Report
+    Report --> History["Historique JSON"]
+```
+
+### Lire les résultats avec prudence
+
+Un sink DOM détecté, un candidat produit par un scanner et une exécution
+confirmée ne sont pas des preuves équivalentes. Une limite de budget, un
+timeout ou une pause réduisent la couverture ; un résultat vide ne prouve pas
+l'absence de vulnérabilité. Le registre des scans est en mémoire, tandis que
+l'historique JSON et les fichiers de rapport persistent sur disque.
+
+Le [modèle de rapport de démonstration](docs/rapport-exemple.md) fournit une
+trame anonymisée à compléter avec des preuves réelles. Il ne décrit aucun scan
+effectué.
 
 ---
 
